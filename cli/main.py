@@ -1,0 +1,196 @@
+"""`mcp-host` CLI — the provider lifecycle commands an onboarding dev-agent runs.
+
+    mcp-host scaffold <id>            generate a provider skeleton (provider.json + provider.py)
+    mcp-host validate <path>         schema-check provider.json + TDQS quality gate
+    mcp-host tdqs <path>             show the per-tool quality breakdown
+    mcp-host syndicate <path>        emit server.json + registry targets + install snippets (dry-run)
+
+`deploy` and `upload` target the live host (gateway mount + artifact upload API) and are run
+against a running MCP-Host; they are documented in ONBOARDING.md. The commands here are the
+offline, pre-deploy steps a provider repo must pass in CI.
+"""
+
+from __future__ import annotations
+
+import argparse
+import importlib.util
+import inspect
+import json
+import sys
+from pathlib import Path
+from typing import Any
+
+from mcp_host.registry.syndicate import plan_syndication
+from mcp_host.registry.tdqs import GATE, score_provider
+from mcp_host.sdk import Provider
+from mcp_host.sdk.manifest import ManifestError, load_manifest, validate_manifest
+
+BASE_URL = "https://mcp-host"
+
+SCAFFOLD_MANIFEST = {
+    "$schema": "https://mcp-host/schemas/provider.schema.json",
+    "id": "PROVIDER_ID",
+    "display_name": "Display Name",
+    "discipline": "your-discipline",
+    "version": "0.1.0",
+    "summary": "One sentence describing what this MCP provides (>= 40 chars recommended).",
+    "owner_namespace": "io.github.YOURNAME",
+    "transport": "streamable-http",
+    "auth": {"modes": ["oauth2.1", "api_key"], "scopes": ["PROVIDER_ID:read"]},
+    "data": {"postgres_schema": "PROVIDER_ID"},
+    "tools": [
+        {"name": "example_tool", "scope": "PROVIDER_ID:read", "price_usdc": "0.00",
+         "description": "Describe what this tool does and any usage constraints in at least forty characters.",
+         "annotations": {"readOnlyHint": True}}
+    ],
+    "limits": {"rate_per_min": 60, "max_request_kb": 50},
+    "syndication": {"official_registry": True, "glama": True, "mcp_so": True, "pulsemcp": True},
+    "health": "/mcp/PROVIDER_ID/health",
+}
+
+SCAFFOLD_PY = '''"""{id} provider — implements the MCP-Host Provider Protocol."""
+
+from __future__ import annotations
+
+from pydantic import BaseModel, ConfigDict, Field
+
+from mcp_host.sdk import Provider, tool
+
+
+class ExampleInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    arg: str = Field(min_length=1, max_length=200)
+
+
+class {cls}(Provider):
+    manifest_path = "provider.json"
+
+    @tool("example_tool", input_model=ExampleInput)
+    def example_tool(self, ctx, arg: str):
+        # ctx.principal / ctx.tenant_db / ctx.artifacts / ctx.secret(...) available here.
+        return ctx.json_text({{"echo": arg}})
+'''
+
+
+def _load_provider_from_path(manifest_path: Path) -> Provider | None:
+    """Import a sibling provider.py and instantiate the Provider subclass, if present."""
+    py = manifest_path.parent / "provider.py"
+    if not py.exists():
+        return None
+    spec = importlib.util.spec_from_file_location(f"_prov_{manifest_path.parent.name}", py)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = mod  # so inspect.getfile() can resolve the class's source file
+    spec.loader.exec_module(mod)  # type: ignore[union-attr]
+    for _, obj in inspect.getmembers(mod, inspect.isclass):
+        if issubclass(obj, Provider) and obj is not Provider:
+            return obj()
+    return None
+
+
+def cmd_scaffold(args) -> int:
+    pid = args.id
+    cls = "".join(p.capitalize() for p in pid.replace("-", "_").split("_")) + "Provider"
+    out = Path(args.dir or pid.replace("-", "_"))
+    out.mkdir(parents=True, exist_ok=True)
+    manifest = json.loads(json.dumps(SCAFFOLD_MANIFEST).replace("PROVIDER_ID", pid))
+    # Postgres schema identifiers can't contain hyphens; normalize from the (hyphen-allowed) id.
+    manifest["data"]["postgres_schema"] = pid.replace("-", "_")
+    (out / "provider.json").write_text(json.dumps(manifest, indent=2) + "\n")
+    (out / "provider.py").write_text(SCAFFOLD_PY.format(id=pid, cls=cls))
+    (out / "__init__.py").write_text("")
+    print(f"scaffolded {pid} in {out}/  (edit provider.json + provider.py, then `mcp-host validate {out}`)")
+    return 0
+
+
+def validate_path(manifest_path: Path) -> dict[str, Any]:
+    """Returns a report dict; raises ManifestError on schema failure."""
+    manifest = load_manifest(manifest_path)
+    report: dict[str, Any] = {"id": manifest["id"], "schema": "ok"}
+    provider = _load_provider_from_path(manifest_path)
+    if provider is not None:
+        score, scores = score_provider(provider)
+        report["tdqs"] = score
+        report["tdqs_pass"] = score >= GATE
+        report["tool_scores"] = [{"name": s.name, "score": s.score, "reasons": s.reasons} for s in scores]
+        report["reconciled"] = "ok"  # instantiation already reconciled @tool vs manifest
+    else:
+        report["tdqs"] = None
+        report["note"] = "no provider.py found; schema validated only"
+    return report
+
+
+def cmd_validate(args) -> int:
+    path = Path(args.path)
+    mp = path / "provider.json" if path.is_dir() else path
+    try:
+        report = validate_path(mp)
+    except ManifestError as e:
+        print(str(e), file=sys.stderr)
+        return 1
+    print(json.dumps(report, indent=2))
+    if report.get("tdqs_pass") is False:
+        print(f"TDQS {report['tdqs']} below gate {GATE} — not deployable", file=sys.stderr)
+        return 1
+    return 0
+
+
+def cmd_tdqs(args) -> int:
+    path = Path(args.path)
+    mp = path / "provider.json" if path.is_dir() else path
+    provider = _load_provider_from_path(mp)
+    if provider is None:
+        print("no provider.py to score", file=sys.stderr)
+        return 1
+    score, scores = score_provider(provider)
+    print(f"server TDQS: {score} (gate {GATE})")
+    for s in scores:
+        flag = "ok" if s.score >= GATE else "LOW"
+        print(f"  [{flag}] {s.name}: {s.score}  {('— ' + '; '.join(s.reasons)) if s.reasons else ''}")
+    return 0 if score >= GATE else 1
+
+
+def cmd_syndicate(args) -> int:
+    path = Path(args.path)
+    mp = path / "provider.json" if path.is_dir() else path
+    manifest = load_manifest(mp)
+    plan = plan_syndication(manifest, args.base_url)
+    print(json.dumps({
+        "targets": plan.targets,
+        "warnings": plan.warnings,
+        "server_json": plan.server_json,
+        "install_snippets": plan.snippets,
+    }, indent=2))
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="mcp-host", description="MCP-Host provider lifecycle CLI")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    s = sub.add_parser("scaffold", help="generate a provider skeleton")
+    s.add_argument("id")
+    s.add_argument("--dir")
+    s.set_defaults(func=cmd_scaffold)
+
+    v = sub.add_parser("validate", help="schema + TDQS gate")
+    v.add_argument("path")
+    v.set_defaults(func=cmd_validate)
+
+    t = sub.add_parser("tdqs", help="tool-quality breakdown")
+    t.add_argument("path")
+    t.set_defaults(func=cmd_tdqs)
+
+    y = sub.add_parser("syndicate", help="emit server.json + targets + snippets (dry-run)")
+    y.add_argument("path")
+    y.add_argument("--base-url", default=BASE_URL)
+    y.set_defaults(func=cmd_syndicate)
+    return p
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

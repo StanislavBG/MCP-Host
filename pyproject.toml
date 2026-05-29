@@ -1,0 +1,25 @@
+# MCP-Host — pyproject.
+# dependencies = [] is INTENTIONAL (matches edgar-rag): keep uv from auto-resolving the full
+# tree (avoids wheel conflicts on Replit). Runtime pins live in deps.txt, dev pins in deps-dev.txt.
+# This file holds tool config only.
+[project]
+name = "mcp-host"
+version = "0.1.0"
+description = "The iStore for MCPs — control plane + runtime + storefront for a fleet of MCP servers."
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+mcp-host = "cli.main:main"
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.setuptools]
+packages = ["mcp_host", "cli"]

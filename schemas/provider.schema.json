@@ -1,0 +1,158 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mcp-host/schemas/provider.schema.json",
+  "title": "MCP-Host Provider Manifest",
+  "description": "Single source of truth for a hosted MCP. The gateway derives the route mount, OAuth scopes, per-tool price map, Postgres schema + RLS policy, rate limits, the syndication server.json, and the storefront listing from this one file. Nothing in this list may be configured elsewhere.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "display_name", "discipline", "version", "summary", "transport", "auth", "data", "tools"],
+  "properties": {
+    "$schema": { "type": "string" },
+    "id": {
+      "type": "string",
+      "description": "URL-safe provider id. Becomes /mcp/<id> and the <id>.* Postgres schema.",
+      "pattern": "^[a-z][a-z0-9-]{1,38}[a-z0-9]$"
+    },
+    "display_name": { "type": "string", "minLength": 1, "maxLength": 80 },
+    "discipline": {
+      "type": "string",
+      "description": "Short kebab tag for the storefront category, e.g. sec-filings-intelligence.",
+      "pattern": "^[a-z][a-z0-9-]*$",
+      "maxLength": 60
+    },
+    "version": {
+      "type": "string",
+      "description": "Semantic version. Drives versioned routing (/mcp/<id>@<semver>).",
+      "pattern": "^\\d+\\.\\d+\\.\\d+(?:[-+].+)?$"
+    },
+    "summary": { "type": "string", "minLength": 1, "maxLength": 300 },
+    "homepage": { "type": "string", "format": "uri" },
+    "owner_namespace": {
+      "type": "string",
+      "description": "Reverse-DNS namespace for official-registry publishing, e.g. io.github.StanislavBG. Ownership is verified once (GitHub mcpName / DNS TXT). Last segment is the GitHub username (case preserved).",
+      "pattern": "^[a-z0-9]+(?:\\.[A-Za-z0-9-]+)+$"
+    },
+    "transport": {
+      "type": "string",
+      "description": "MCP wire transport. The platform standard is streamable-http.",
+      "enum": ["streamable-http"]
+    },
+    "auth": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["modes", "scopes"],
+      "properties": {
+        "modes": {
+          "type": "array",
+          "items": { "enum": ["oauth2.1", "api_key"] },
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "scopes": {
+          "type": "array",
+          "description": "All OAuth scopes this provider's tools reference. Every tool.scope MUST appear here.",
+          "items": { "type": "string", "pattern": "^[a-z][a-z0-9-]*:[a-z][a-z0-9-]*$" },
+          "minItems": 1,
+          "uniqueItems": true
+        }
+      }
+    },
+    "data": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["postgres_schema"],
+      "properties": {
+        "postgres_schema": {
+          "type": "string",
+          "description": "RLS-isolated schema name. Conventionally equals id (or a short alias). Provider migrations live here.",
+          "pattern": "^[a-z][a-z0-9_]{1,38}[a-z0-9]$"
+        },
+        "artifacts": {
+          "type": "array",
+          "description": "Large/vector/blob data pushed via the upload API to per-provider object storage and mounted read-only at runtime.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "kind"],
+            "properties": {
+              "name": { "type": "string", "pattern": "^[a-z][a-z0-9_-]*$", "maxLength": 40 },
+              "kind": { "enum": ["lancedb", "sqlite", "parquet", "jsonl", "blob"] },
+              "max_gb": { "type": "number", "exclusiveMinimum": 0, "maximum": 100 }
+            }
+          }
+        }
+      }
+    },
+    "tools": {
+      "type": "array",
+      "description": "Every MCP tool the provider exposes. Names/schemas are enforced against the Provider SDK @tool methods at boot.",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "scope", "price_usdc"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "MCP tool name. Dotted namespaces allowed (e.g. panels.trending).",
+            "pattern": "^[a-z][a-z0-9_]*(?:\\.[a-z][a-z0-9_]*)*$",
+            "maxLength": 64
+          },
+          "description": {
+            "type": "string",
+            "description": "Human/LLM-facing tool description. Scored by TDQS at validate time; aim for >= 40 chars stating what the tool does and any constraints.",
+            "maxLength": 1000
+          },
+          "scope": {
+            "type": "string",
+            "description": "OAuth scope required to call this tool. MUST be listed in auth.scopes.",
+            "pattern": "^[a-z][a-z0-9-]*:[a-z][a-z0-9-]*$"
+          },
+          "price_usdc": {
+            "type": "string",
+            "description": "Per-call price. Free-during-alpha values: $0.00, $0, 0, or empty string.",
+            "pattern": "^\\$?\\d+(?:\\.\\d{1,6})?$|^$"
+          },
+          "annotations": {
+            "type": "object",
+            "description": "MCP tool annotations used for client planning and quality scoring.",
+            "additionalProperties": false,
+            "properties": {
+              "readOnlyHint": { "type": "boolean" },
+              "destructiveHint": { "type": "boolean" },
+              "idempotentHint": { "type": "boolean" },
+              "openWorldHint": { "type": "boolean" }
+            }
+          },
+          "input_schema_ref": {
+            "type": "string",
+            "description": "JSON Pointer / $ref to the tool's input JSON Schema (Pydantic model with extra=forbid)."
+          }
+        }
+      }
+    },
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "rate_per_min": { "type": "integer", "minimum": 1, "maximum": 100000 },
+        "max_request_kb": { "type": "integer", "minimum": 1, "maximum": 2097152 }
+      }
+    },
+    "syndication": {
+      "type": "object",
+      "description": "Which external registries mcp-host syndicate publishes to. The official registry is the canonical feed the others auto-ingest.",
+      "additionalProperties": false,
+      "properties": {
+        "official_registry": { "type": "boolean" },
+        "glama": { "type": "boolean" },
+        "mcp_so": { "type": "boolean" },
+        "pulsemcp": { "type": "boolean" }
+      }
+    },
+    "health": {
+      "type": "string",
+      "description": "Readiness endpoint path, conventionally /mcp/<id>/health."
+    }
+  }
+}

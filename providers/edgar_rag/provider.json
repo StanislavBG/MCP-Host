@@ -1,0 +1,33 @@
+{
+  "$schema": "https://mcp-host/schemas/provider.schema.json",
+  "id": "edgar-rag",
+  "display_name": "EDGAR RAG",
+  "discipline": "sec-filings-intelligence",
+  "version": "0.1.0",
+  "summary": "Semantic search and intelligence over SEC EDGAR filings (10-K, 10-Q, 8-K).",
+  "homepage": "https://github.com/StanislavBG/edgar-rag",
+  "owner_namespace": "io.github.StanislavBG",
+  "transport": "streamable-http",
+  "auth": { "modes": ["oauth2.1", "api_key"], "scopes": ["edgar:read", "edgar:search"] },
+  "data": {
+    "postgres_schema": "edgar",
+    "artifacts": [ { "name": "vectors", "kind": "lancedb", "max_gb": 5 } ]
+  },
+  "tools": [
+    { "name": "search_filings", "scope": "edgar:search", "price_usdc": "0.00",
+      "description": "Semantic search across indexed SEC EDGAR filings; returns ranked passages with company, filing type, date and source. Free during alpha.",
+      "annotations": { "readOnlyHint": true, "openWorldHint": true } },
+    { "name": "list_companies", "scope": "edgar:read", "price_usdc": "0.00",
+      "description": "List every company with indexed filings, including CIK and the count of indexed passages per company.",
+      "annotations": { "readOnlyHint": true } },
+    { "name": "get_filing", "scope": "edgar:read", "price_usdc": "0.00",
+      "description": "Retrieve all indexed passages for one filing identified by its accession number.",
+      "annotations": { "readOnlyHint": true } },
+    { "name": "get_data_catalog", "scope": "edgar:read", "price_usdc": "0.00",
+      "description": "Self-describe exactly what data is indexed: companies, filing types, date ranges and passage counts.",
+      "annotations": { "readOnlyHint": true } }
+  ],
+  "limits": { "rate_per_min": 60, "max_request_kb": 50 },
+  "syndication": { "official_registry": true, "glama": true, "mcp_so": true, "pulsemcp": true },
+  "health": "/mcp/edgar-rag/health"
+}

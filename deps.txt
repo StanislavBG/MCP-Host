@@ -1,0 +1,9 @@
+# Runtime dependencies (exact pins). Installed by install.sh via: pip install --no-cache-dir -r deps.txt
+fastapi==0.135.3
+uvicorn[standard]==0.42.0
+pydantic==2.12.5
+httpx==0.28.1
+python-multipart==0.0.22
+python-dotenv==1.2.2
+# Postgres driver (production). Local tests fall back to SQLite, so this is import-guarded.
+psycopg[binary]==3.2.3

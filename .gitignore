@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+*.db
+*.db-wal
+*.db-shm
+.env
+# artifacts and vector data are NEVER committed (pushed via the upload API)
+/objects/
+/tmp/
+*.tar.gz

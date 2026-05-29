@@ -1,0 +1,33 @@
+{
+  "$schema": "https://mcp-host/schemas/provider.schema.json",
+  "id": "signal-builder",
+  "display_name": "Signal Builder",
+  "discipline": "social-market-signals",
+  "version": "0.1.0",
+  "summary": "Per-ticker social-media metrics, sentiment and catalyst signals aggregated from public discussion.",
+  "homepage": "https://github.com/StanislavBG/signal-builder",
+  "owner_namespace": "io.github.StanislavBG",
+  "transport": "streamable-http",
+  "auth": { "modes": ["oauth2.1", "api_key"], "scopes": ["signal:read", "signal:write"] },
+  "data": {
+    "postgres_schema": "signal",
+    "artifacts": [ { "name": "panel_history", "kind": "sqlite", "max_gb": 2 } ]
+  },
+  "tools": [
+    { "name": "panels.trending", "scope": "signal:read", "price_usdc": "0.00",
+      "description": "Top tickers ranked by social mention count over a rolling window, with mention totals per ticker.",
+      "annotations": { "readOnlyHint": true } },
+    { "name": "signal.ticker_velocity", "scope": "signal:read", "price_usdc": "0.00",
+      "description": "Mention velocity for one ticker over a window: current rate versus the prior period, as a momentum read.",
+      "annotations": { "readOnlyHint": true } },
+    { "name": "signal.track_ticker", "scope": "signal:write", "price_usdc": "0.00",
+      "description": "Enqueue a ticker for proactive tracking so future panels include it; a write operation gated by signal:write.",
+      "annotations": { "readOnlyHint": false, "idempotentHint": true } },
+    { "name": "signal.list_tracked_tickers", "scope": "signal:read", "price_usdc": "0.00",
+      "description": "List the tickers this caller has enqueued for tracking, most recent first.",
+      "annotations": { "readOnlyHint": true } }
+  ],
+  "limits": { "rate_per_min": 120, "max_request_kb": 50 },
+  "syndication": { "official_registry": true, "glama": true, "mcp_so": true, "pulsemcp": true },
+  "health": "/mcp/signal-builder/health"
+}

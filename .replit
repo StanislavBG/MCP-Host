@@ -1,0 +1,18 @@
+entrypoint = "mcp_host/server.py"
+modules = ["python-3.11"]
+
+[nix]
+channel = "stable-24_05"
+
+[env]
+PORT = "8080"
+PYTHONPATH = "/home/runner/workspace"
+
+[deployment]
+build = "sh install.sh"
+run = ["sh", "-c", "PYTHONPATH=.pythonlibs:/home/runner/workspace python3 -m uvicorn mcp_host.server:app --host 0.0.0.0 --port 8080 --timeout-keep-alive 120 --timeout-graceful-shutdown 30"]
+deploymentTarget = "cloudrun"
+
+[[ports]]
+localPort = 8080
+externalPort = 80

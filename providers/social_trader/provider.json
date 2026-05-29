@@ -1,0 +1,27 @@
+{
+  "$schema": "https://mcp-host/schemas/provider.schema.json",
+  "id": "social-trader",
+  "display_name": "Social Signals Trader",
+  "discipline": "trade-signal-publishing",
+  "version": "0.1.0",
+  "summary": "Publishes buy/sell signals matching a managed portfolio for consumers to subscribe to and act on.",
+  "homepage": "https://github.com/StanislavBG/social-signals-trader",
+  "owner_namespace": "io.github.StanislavBG",
+  "transport": "streamable-http",
+  "auth": { "modes": ["oauth2.1", "api_key"], "scopes": ["trader:read", "trader:subscribe"] },
+  "data": { "postgres_schema": "trader" },
+  "tools": [
+    { "name": "signals.feed", "scope": "trader:subscribe", "price_usdc": "0.05",
+      "description": "Subscribe to the live buy/sell signal feed matching the published portfolio; each signal carries ticker, side, conviction and rationale. Subscription-gated and priced.",
+      "annotations": { "readOnlyHint": true } },
+    { "name": "signals.history", "scope": "trader:read", "price_usdc": "0.00",
+      "description": "Return recently published signals with their realized or simulated outcomes for transparency and backtesting.",
+      "annotations": { "readOnlyHint": true } },
+    { "name": "portfolio.positions", "scope": "trader:read", "price_usdc": "0.00",
+      "description": "Show the current published portfolio positions, sizes and entry context that the signals are derived from.",
+      "annotations": { "readOnlyHint": true } }
+  ],
+  "limits": { "rate_per_min": 60, "max_request_kb": 50 },
+  "syndication": { "official_registry": true, "glama": true, "mcp_so": true, "pulsemcp": true },
+  "health": "/mcp/social-trader/health"
+}
