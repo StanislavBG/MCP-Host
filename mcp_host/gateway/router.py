@@ -19,7 +19,7 @@ from typing import Any
 from mcp_host.auth import entitlements
 from mcp_host.auth.principal import authenticate
 from mcp_host.billing.x402 import BillingConfig, Facilitator, charge, payment_challenge
-from mcp_host.data.tenant import TenantDB
+from mcp_host.data.tenant import SqliteTenantManager
 from mcp_host.sdk import ErrorCode, Provider, ToolContext, ToolError
 from mcp_host.sdk.errors import JSONRPC_CODE
 from mcp_host.sdk.manifest import price_is_free
@@ -49,16 +49,24 @@ class HandleResult:
 
 class Gateway:
     def __init__(self, store, cfg: GatewayConfig, facilitator: Facilitator | None,
-                 tenant_conn=None) -> None:
+                 tenant_conn=None, tenant=None) -> None:
         self.store = store
         self.cfg = cfg
         self.facilitator = facilitator
-        self.tenant_conn = tenant_conn
+        # `tenant` is a TenantManager; `tenant_conn` is the legacy SQLite shortcut.
+        if tenant is not None:
+            self.tenant = tenant
+        elif tenant_conn is not None:
+            self.tenant = SqliteTenantManager(tenant_conn)
+        else:
+            self.tenant = None
         self._mounts: dict[str, Mounted] = {}
 
     # ---- mounting --------------------------------------------------------
     def mount(self, provider: Provider, secrets: dict[str, str] | None = None) -> None:
         self.store.register_provider(provider.manifest)
+        if self.tenant is not None:
+            self.tenant.provision(provider.id, provider.manifest["data"]["postgres_schema"])
         self._mounts[provider.id] = Mounted(provider, secrets or {})
 
     def provider(self, provider_id: str) -> Provider | None:
@@ -138,7 +146,7 @@ class Gateway:
         ctx = ToolContext(
             provider_id=provider_id,
             principal=principal,
-            tenant_db=TenantDB(self.tenant_conn, provider_id) if self.tenant_conn else None,
+            tenant_db=self.tenant.handle(provider_id) if self.tenant else None,
             secrets=mount.secrets,
         )
         t0 = time.perf_counter()

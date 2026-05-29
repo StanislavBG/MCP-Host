@@ -21,7 +21,7 @@ mcp_host/
   gateway/        Gateway orchestrator (auth → entitlement → billing → dispatch → metering)
   auth/           OAuth2.1-style token + API-key validation; entitlement engine
   billing/        shared x402 wallet, per-tool price map, fail-closed, admin bypass
-  data/           SqliteStore control plane (Postgres/RLS in prod) + tenant-scoped TenantDB
+  data/           store.py (SqliteStore + TenantDB, dev) · pg.py (PgStore + RLS, prod) · factory.py (picks backend from DATABASE_URL)
   artifacts/      HMAC chunked upload store + read-only ArtifactView
   registry/       server.json generation, TDQS quality gate, syndication planner
   observability/  (admin/usage + inspector live in server.py)
@@ -52,6 +52,13 @@ MCP_HOST_SIGNING_KEY=k WALLET_ADDRESS=0xSHARED UPLOAD_SECRET=admin \
 
 ## Status
 
-Milestones M0–M8 implemented and tested on a SQLite/stub-facilitator dev backend. Production
-swaps three seams behind the same interfaces: `SqliteStore`→Postgres+RLS, `StubFacilitator`→the
-real x402 HTTP client, and the local artifact dir→object storage. Nothing else changes.
+Milestones M0–M8 implemented and tested (86 pass, 2 Postgres-live tests skipped locally).
+
+**Postgres is real:** set `DATABASE_URL=postgres://…` (Replit/Neon) and `factory.make_backends()`
+boots `PgStore` + per-provider schemas with Row-Level Security automatically — no code change.
+Validate the live DB in Replit with `MCP_HOST_TEST_PG="$DATABASE_URL" pytest tests/test_pg_backend.py`
+(covers control-plane CRUD and cross-tenant RLS isolation). With `DATABASE_URL` unset it uses
+in-memory SQLite for instant local/dev runs.
+
+Two seams remain interface-swaps for later: `StubFacilitator`→the real x402 HTTP client, and the
+local artifact dir→object storage.

@@ -20,8 +20,8 @@ from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 
 from mcp_host.artifacts.store import ArtifactStore, verify_upload_auth
 from mcp_host.billing.x402 import StubFacilitator
-from mcp_host.data.store import Entitlement, make_store
-from mcp_host.data.tenant import open_tenant_conn
+from mcp_host.data.factory import make_backends
+from mcp_host.data.store import Entitlement
 from mcp_host.gateway.router import Gateway, GatewayConfig
 from mcp_host.registry.serverjson import to_server_json
 from mcp_host.registry.tdqs import passes
@@ -45,9 +45,9 @@ def mask_ip(ip: str) -> str:
 
 
 def build_gateway() -> Gateway:
-    store = make_store()
+    store, tenant = make_backends()
     gw = Gateway(store, GatewayConfig(BASE_URL, SIGNING_KEY, WALLET, ADMIN_KEY),
-                 facilitator=StubFacilitator(), tenant_conn=open_tenant_conn())
+                 facilitator=StubFacilitator(), tenant=tenant)
     from providers import load_pilots
 
     for provider, secrets in load_pilots():

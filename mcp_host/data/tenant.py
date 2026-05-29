@@ -86,3 +86,30 @@ def open_tenant_conn(path: str = ":memory:") -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys=ON")
     return conn
+
+
+class TenantManager:
+    """Produces a per-provider tenant handle and provisions a provider's isolated storage.
+
+    The gateway holds one of these and calls handle(provider_id) per request and
+    provision(provider_id, schema) at mount/deploy. Two implementations exist:
+    SqliteTenantManager (dev/test) and PgTenantManager (production, real schemas + RLS).
+    """
+
+    def provision(self, provider_id: str, schema: str) -> None:  # pragma: no cover - interface
+        raise NotImplementedError
+
+    def handle(self, provider_id: str):  # pragma: no cover - interface
+        raise NotImplementedError
+
+
+class SqliteTenantManager(TenantManager):
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        self._conn = conn
+
+    def provision(self, provider_id: str, schema: str) -> None:
+        # SQLite emulation creates tables lazily on first create_table; nothing to do here.
+        return None
+
+    def handle(self, provider_id: str) -> TenantDB:
+        return TenantDB(self._conn, provider_id)
