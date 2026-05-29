@@ -11,9 +11,13 @@ Run: uvicorn mcp_host.server:app --host 0.0.0.0 --port 8080
 
 from __future__ import annotations
 
+import logging
 import os
 import time
 from contextlib import asynccontextmanager
+
+logger = logging.getLogger("mcp-host")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
@@ -61,10 +65,42 @@ def build_gateway() -> Gateway:
     return gw
 
 
+def preflight() -> list[str]:
+    """Loud config check at boot. Returns the list of problems (also logged).
+
+    These are the misconfigurations that silently break a first deploy: dev signing key (anyone
+    could mint tokens), wrong/default public URL (OAuth resource-indicator + .well-known/server.json
+    break), no Postgres (in-memory SQLite that resets every restart), default wallet, ephemeral
+    artifact dir.
+    """
+    problems: list[str] = []
+    if SIGNING_KEY == "dev-signing-key":
+        problems.append("MCP_HOST_SIGNING_KEY is the dev default — set a strong secret (tokens are forgeable otherwise)")
+    if BASE_URL == "https://mcp-host":
+        problems.append("MCP_HOST_BASE_URL is the placeholder — set it to your real public URL "
+                        "(OAuth resource indicators, .well-known and server.json all derive from it)")
+    if not os.environ.get("DATABASE_URL", "").startswith("postgres"):
+        problems.append("DATABASE_URL is not a Postgres URL — running on in-memory SQLite that RESETS "
+                        "on every restart. Add Replit Postgres before deploying.")
+    if WALLET == "0xSHARED":
+        problems.append("WALLET_ADDRESS is the placeholder — set your shared wallet address")
+    if not ADMIN_KEY:
+        problems.append("UPLOAD_SECRET is empty — artifact upload and admin bypass are disabled")
+    if ARTIFACT_ROOT.startswith("/tmp"):
+        problems.append("MCP_HOST_ARTIFACTS points at /tmp (ephemeral) — set a persistent path on the VM")
+    for p in problems:
+        logger.warning("[preflight] %s", p)
+    if not problems:
+        logger.info("[preflight] configuration OK")
+    return problems
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    app.state.preflight = preflight()
     app.state.gw = build_gateway()
     app.state.artifacts = ArtifactStore(ARTIFACT_ROOT)
+    logger.info("[boot] mounted providers: %s", [p.id for p in app.state.gw.providers()])
     yield
 
 
@@ -90,7 +126,11 @@ async def audit_and_security(request: Request, call_next):
 @app.get("/health")
 async def health(request: Request):
     gw: Gateway = request.app.state.gw
-    return {"status": "ok", "providers": [p.id for p in gw.providers()],
+    problems = getattr(request.app.state, "preflight", [])
+    return {"status": "ok" if not problems else "degraded",
+            "providers": [p.id for p in gw.providers()],
+            "config_warnings": problems,
+            "backend": "postgres" if os.environ.get("DATABASE_URL", "").startswith("postgres") else "sqlite-memory",
             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime())}
 
 

@@ -1,68 +1,106 @@
-# MCP-Host on Replit — Deployment Contract
+# MCP-Host on Replit — first-boot deployment guide
 
-This file is the runtime/deployment contract for MCP-Host on Replit. It is authoritative for
-how the platform boots, where data lives, and how providers are brought up. The Replit
-environment and the GitHub repos are created AFTER the design is approved; this file tells the
-agent that provisions them exactly what to build.
+Follow this top to bottom and the first deploy works. This is the infra + hosting layer; once
+it's up, other agents publish their MCPs and data on top of it per `ONBOARDING.md`.
 
-## Target
+---
 
-- **Reserved VM** deployment (always-on; no cold starts). A single Python 3.11 process serves
-  the gateway + all mounted providers.
-- Upgrade path (when one VM saturates): multiple Reserved VMs behind a load balancer +
-  externalized session cache (Redis). The gateway is written stateless with session state in
-  Postgres so this is a config change, not a rewrite.
+## 0. TL;DR ordered checklist
 
-## Run
+1. Import the GitHub repo `StanislavBG/MCP-Host` into a new Repl.
+2. **Add Replit PostgreSQL** (Tools → Database). This auto-sets `DATABASE_URL`.
+3. Set the **5 required Secrets** (§2).
+4. **Deploy → choose "Reserved VM"** (NOT Autoscale). §3.
+5. Open `/health` — `status` must be `"ok"` and `backend` must be `"postgres"`. §5.
+6. Point client/agent tokens at your real URL and you're live. §6.
 
-- Listen on port **8080**, host **0.0.0.0**.
-- Command:
-  ```
-  uvicorn mcp_host.server:app --host 0.0.0.0 --port 8080 \
-    --timeout-keep-alive 120 --timeout-graceful-shutdown 30
-  ```
-- `PYTHONPATH` includes `.pythonlibs` (Replit's uv install dir) + workspace.
-- A FastAPI lifespan hook warms embedding models and opens the Postgres pool before the first
-  request, so cold first-calls are fast.
+---
 
-## Build (`install.sh` — always `exit 0`)
+## 1. Deployment type — Reserved VM (required, not Autoscale)
 
-- `pip install --no-cache-dir -r deps.txt`; retry via `python3 -m pip` if an import fails.
-- Download required models from the public HuggingFace CDN at build time.
-- Pull provider artifacts (vectors/blobs) from object store / GitHub Releases (`GITHUB_TOKEN`)
-  into each provider's read-only artifact mount.
-- `pyproject.toml` keeps `dependencies = []` intentionally (tool config only — avoids uv
-  auto-resolution conflicts). Runtime pins live in `deps.txt`; dev-only pins in `deps-dev.txt`;
-  `replit.nix` pins `python311`.
+Pick **Reserved VM** in the Deploy pane. `.replit` already sets `deploymentTarget = "gce"` to
+match. Do **not** use Autoscale/Cloud Run: this is a single always-on stateful process — one
+pooled DB connection, a local artifact directory, and (later) background workers — none of which
+survive a scale-to-zero / multi-instance model. Smallest VM tier is fine to start.
 
-## Data
+- Run command and port are pinned in `.replit`: `uvicorn mcp_host.server:app` on `0.0.0.0:8080`,
+  `--timeout-keep-alive 120`; `[[ports]]` maps 8080 → external 80. Don't change these.
+- Build is `sh install.sh` (installs `deps.txt`, always exits 0). `pyproject.toml` keeps
+  `dependencies = []` on purpose; runtime pins live in `deps.txt`.
 
-- **Postgres** via `DATABASE_URL` (Replit Postgres or Neon). RLS enabled. The gateway sets
-  `app.tenant_id=<provider>` per request so a provider sees only its own rows.
-  Schemas: `platform.*` (control-plane) + one `<provider>.*` per provider.
-- **Artifacts**: object storage, mounted read-only into providers. NEVER use the ephemeral
-  container filesystem for source-of-truth data. Atomic swap + cache reload on new upload.
+---
 
-## Secrets (Replit Deployment Secrets → GCP Secret Manager)
+## 2. Secrets (Deployments → Secrets)
 
-- `WALLET_ADDRESS`, `X402_FACILITATOR_URL`, admin/upload key (`UPLOAD_SECRET`), `DATABASE_URL`,
-  OAuth signing keys, and per-provider third-party secrets (`SEC_USER_AGENT`, `ALPACA_*`,
-  `ANTHROPIC_API_KEY`, ...). Secrets are injected into the provider context at call time —
-  providers never read raw env for secrets.
-- Never echo secrets in logs or build output.
+`DATABASE_URL` is auto-provided by Replit Postgres — you do **not** set it. The production DB
+starts empty; `PgStore` creates the `platform.*` schema automatically on first boot.
 
-## Health / domains
+**Required (5) — the app warns at boot and on `/health` if any are missing/default:**
 
-- `GET /health` — liveness + per-provider readiness (incl. artifact/data presence).
-- Custom domain + automatic TLS on a paid plan.
-- Background workers (signal-builder curator, trader snapshot loop) run in-VM, each scoped to
-  its own `<provider>.*` schema.
+| Secret | What to set it to | Why it's required |
+|---|---|---|
+| `MCP_HOST_BASE_URL` | your real public URL, e.g. `https://<repl>.replit.app` (or your custom domain), **no trailing slash** | OAuth resource-indicator validation, `.well-known/mcp.json`, and the published `server.json` all derive from it. If wrong, agent tokens won't validate and install links point nowhere. |
+| `MCP_HOST_SIGNING_KEY` | a long random secret | Signs/validates bearer tokens. The dev default makes tokens forgeable. |
+| `WALLET_ADDRESS` | your shared receiving wallet (Base L2 / USDC) | The single platform wallet for all priced tools. |
+| `UPLOAD_SECRET` | a long random secret | Bearer for the artifact upload API; also the admin/x402-bypass key. |
+| `MCP_HOST_ARTIFACTS` | a persistent path on the VM, e.g. `/home/runner/workspace/objects` | Where uploaded vectors/blobs live. The default `/tmp` is ephemeral. (Object storage is a later swap.) |
 
-## Bring-up ordering (after GitHub repos exist)
+**Per-provider third-party secrets (add the ones your mounted providers need):**
+`SEC_USER_AGENT` (edgar-rag), `ALPACA_API_KEY` + `ANTHROPIC_API_KEY` (social-trader). These are
+injected into each provider via `ctx.secret(...)`; providers never read env directly.
 
-1. Provision Postgres + object store.
-2. Deploy the gateway.
-3. `mcp-host deploy <id>` for each provider (mounts, migrates, provisions schema + RLS + bucket).
-4. `mcp-host upload <id>` artifacts.
-5. Smoke-test every provider via `/inspector`.
-6. `mcp-host syndicate <id>` to the registries.
+Never echo secrets in logs or build output.
+
+---
+
+## 3. Data
+
+- **Postgres** (`DATABASE_URL`, auto-set): one DB, `platform.*` control plane + one
+  `<provider>` schema per provider with Row-Level Security. The gateway sets `app.tenant_id`
+  per request; a provider can only see its own rows. Backend is selected automatically —
+  `postgres://…` → `PgStore`; unset → in-memory SQLite (dev only, resets on restart).
+- **Artifacts**: large/vector/blob data is pushed via the authenticated upload API to
+  `MCP_HOST_ARTIFACTS`, never committed to git, never the source-of-truth on `/tmp`.
+
+---
+
+## 4. Billing note for the first deploy (read this)
+
+Billing runs on a **stub x402 facilitator** until the real x402 client is wired (a documented
+later swap). Consequence: any tool priced `> $0.00` returns HTTP **402** and only accepts a
+stubbed payment header — real USDC will not settle yet. For a clean alpha launch, keep all tool
+prices at `"0.00"` in each `provider.json` (the pilots are free except `social-trader`'s
+`signals.feed` at `$0.05` — set it to `0.00` for now unless you're demoing the 402 flow).
+Metering still records every call to `platform.usage` regardless.
+
+---
+
+## 5. Verify the deploy
+
+- `GET /health` → expect `{"status":"ok", "backend":"postgres", "config_warnings":[], "providers":[...]}`.
+  If `status` is `"degraded"`, read `config_warnings` (and the deploy logs `[preflight]` lines) and
+  fix the named secret.
+- `GET /` → storefront lists the mounted providers with their TDQS scores.
+- `GET /mcp/edgar-rag/.well-known/mcp.json` → server card; confirm the `remotes[].url` is your real domain.
+- Optional, validate the live DB once from the Repl shell:
+  `MCP_HOST_TEST_PG="$DATABASE_URL" python -m pytest tests/test_pg_backend.py`
+  (runs the gated control-plane + cross-tenant RLS isolation tests against your real database).
+
+---
+
+## 6. Health / domains / workers
+
+- Custom domain + automatic TLS: add it in the Deploy pane (paid plan), then set
+  `MCP_HOST_BASE_URL` to that domain and redeploy.
+- Background workers (signal-builder curator, trader snapshot) are not yet implemented; when they
+  are, they run in this same Reserved VM scoped to their own `<provider>` schema.
+
+---
+
+## 7. After the host is up — onboarding other agents/MCPs
+
+Tell each provider dev-agent: *"Conform to the MCP-Host Provider Protocol in `ONBOARDING.md`
+(subclass `Provider`, write `provider.json`), pass `mcp-host validate`, then deploy + upload +
+syndicate against this host."* The host gives them transport, OAuth, the shared wallet, RLS data
+isolation, metering, and registry syndication for free. Their independent data lives in their own
+`<provider>` Postgres schema (relational) and their own artifact bucket (vectors/blobs).

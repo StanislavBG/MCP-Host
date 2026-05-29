@@ -20,6 +20,7 @@ def load_pilots():
         (SignalBuilderProvider(), {}),
         (SocialTraderProvider(), {
             "ALPACA_API_KEY": os.environ.get("ALPACA_API_KEY", ""),
+            "ALPACA_SECRET_KEY": os.environ.get("ALPACA_SECRET_KEY", ""),
             "ANTHROPIC_API_KEY": os.environ.get("ANTHROPIC_API_KEY", ""),
         }),
     ]
