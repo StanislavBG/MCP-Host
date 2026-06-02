@@ -31,7 +31,8 @@ def _bearer(provider, scopes):
 def test_health_lists_providers(client):
     r = client.get("/health")
     assert r.status_code == 200
-    assert set(r.json()["providers"]) == {"edgar-rag", "signal-builder", "social-trader"}
+    assert set(r.json()["providers"]) == {
+        "platform-health", "edgar-rag", "signal-builder", "social-trader"}
 
 
 def test_index_renders(client):

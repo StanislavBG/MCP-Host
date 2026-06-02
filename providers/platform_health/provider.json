@@ -1,0 +1,31 @@
+{
+  "$schema": "https://mcp-host/schemas/provider.schema.json",
+  "id": "platform-health",
+  "display_name": "MCP-Host Platform Health",
+  "discipline": "platform-observability",
+  "version": "0.1.0",
+  "summary": "Live health, status and catalog for the MCP-Host platform itself — the first-party monitoring MCP for the whole store.",
+  "homepage": "https://github.com/StanislavBG/MCP-Host",
+  "owner_namespace": "io.github.StanislavBG",
+  "demo": false,
+  "transport": "streamable-http",
+  "auth": { "modes": ["oauth2.1", "api_key"], "scopes": ["platform:read"] },
+  "data": { "postgres_schema": "platform_health" },
+  "tools": [
+    { "name": "platform_status", "scope": "platform:read", "price_usdc": "0.00",
+      "description": "Report live MCP-Host platform status: overall health, version, storage backend, number of mounted providers, uptime in seconds, and any active configuration warnings.",
+      "annotations": { "readOnlyHint": true, "idempotentHint": true } },
+    { "name": "list_providers", "scope": "platform:read", "price_usdc": "0.00",
+      "description": "List every MCP currently mounted on the platform with its id, display name, discipline, exposed tool names, demo flag, and tool-description quality (TDQS) score.",
+      "annotations": { "readOnlyHint": true, "openWorldHint": true } },
+    { "name": "check_provider", "scope": "platform:read", "price_usdc": "0.00",
+      "description": "Run the health check of one mounted provider, identified by its id, and return that provider's readiness payload, or an error if it is not mounted.",
+      "annotations": { "readOnlyHint": true } },
+    { "name": "ping", "scope": "platform:read", "price_usdc": "0.00",
+      "description": "Connectivity echo: returns the optional message you send plus a server timestamp, proving end-to-end reachability of a hosted MCP over the wire.",
+      "annotations": { "readOnlyHint": true, "idempotentHint": true } }
+  ],
+  "limits": { "rate_per_min": 120, "max_request_kb": 16 },
+  "syndication": { "official_registry": true, "glama": true, "mcp_so": true, "pulsemcp": true },
+  "health": "/mcp/platform-health/health"
+}

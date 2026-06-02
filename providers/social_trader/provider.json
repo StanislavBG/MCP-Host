@@ -6,6 +6,7 @@
   "version": "0.1.0",
   "summary": "Publishes buy/sell signals matching a managed portfolio for consumers to subscribe to and act on.",
   "homepage": "https://github.com/StanislavBG/social-signals-trader",
+  "demo": true,
   "owner_namespace": "io.github.StanislavBG",
   "transport": "streamable-http",
   "auth": { "modes": ["oauth2.1", "api_key"], "scopes": ["trader:read", "trader:subscribe"] },

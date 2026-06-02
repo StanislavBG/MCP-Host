@@ -6,6 +6,7 @@
   "version": "0.1.0",
   "summary": "Per-ticker social-media metrics, sentiment and catalyst signals aggregated from public discussion.",
   "homepage": "https://github.com/StanislavBG/signal-builder",
+  "demo": true,
   "owner_namespace": "io.github.StanislavBG",
   "transport": "streamable-http",
   "auth": { "modes": ["oauth2.1", "api_key"], "scopes": ["signal:read", "signal:write"] },

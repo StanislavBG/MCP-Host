@@ -6,6 +6,7 @@
   "version": "0.1.0",
   "summary": "Semantic search and intelligence over SEC EDGAR filings (10-K, 10-Q, 8-K).",
   "homepage": "https://github.com/StanislavBG/edgar-rag",
+  "demo": true,
   "owner_namespace": "io.github.StanislavBG",
   "transport": "streamable-http",
   "auth": { "modes": ["oauth2.1", "api_key"], "scopes": ["edgar:read", "edgar:search"] },

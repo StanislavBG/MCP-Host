@@ -27,6 +27,10 @@
     },
     "summary": { "type": "string", "minLength": 1, "maxLength": 300 },
     "homepage": { "type": "string", "format": "uri" },
+    "demo": {
+      "type": "boolean",
+      "description": "True for sample/reference providers that serve example data and are not a real hosted customer. Badged as 'demo' on the storefront."
+    },
     "owner_namespace": {
       "type": "string",
       "description": "Reverse-DNS namespace for official-registry publishing, e.g. io.github.StanislavBG. Ownership is verified once (GitHub mcpName / DNS TXT). Last segment is the GitHub username (case preserved).",

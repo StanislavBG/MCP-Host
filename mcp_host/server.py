@@ -97,10 +97,25 @@ def preflight() -> list[str]:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    started_at = time.time()
+    app.state.started_at = started_at
     app.state.preflight = preflight()
-    app.state.gw = build_gateway()
+    gw = build_gateway()
+    app.state.gw = gw
     app.state.artifacts = ArtifactStore(ARTIFACT_ROOT)
-    logger.info("[boot] mounted providers: %s", [p.id for p in app.state.gw.providers()])
+    # First-party platform providers get a live view of the host injected at boot.
+    host_meta = {
+        "version": app.version,
+        "base_url": BASE_URL,
+        "backend": getattr(gw.store, "backend", "unknown"),
+        "started_at": started_at,
+        "config_warnings": app.state.preflight,
+    }
+    for p in gw.providers():
+        if hasattr(p, "bind_host"):
+            p.bind_host(gw, host_meta)
+    logger.info("[boot] backend=%s mounted providers: %s",
+                host_meta["backend"], [p.id for p in gw.providers()])
     yield
 
 
@@ -127,10 +142,12 @@ async def audit_and_security(request: Request, call_next):
 async def health(request: Request):
     gw: Gateway = request.app.state.gw
     problems = getattr(request.app.state, "preflight", [])
-    return {"status": "ok" if not problems else "degraded",
+    backend = getattr(gw.store, "backend", "unknown")
+    degraded = bool(problems) or "unreachable" in backend
+    return {"status": "ok" if not degraded else "degraded",
             "providers": [p.id for p in gw.providers()],
             "config_warnings": problems,
-            "backend": "postgres" if os.environ.get("DATABASE_URL", "").startswith("postgres") else "sqlite-memory",
+            "backend": backend,
             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime())}
 
 
@@ -219,13 +236,19 @@ async def index(request: Request):
     for p in gw.providers():
         ok, score, _ = passes(p)
         tools = ", ".join(t["name"] for t in p.manifest["tools"])
-        cards += (f"<div class=card><h2>{p.manifest['display_name']}</h2>"
+        demo = bool(p.manifest.get("demo", False))
+        badge = ("<span class=demo>demo · sample data</span>" if demo
+                 else "<span class=live>live</span>")
+        cards += (f"<div class='card{' demo-card' if demo else ''}'><h2>{p.manifest['display_name']} {badge}</h2>"
                   f"<p>{p.manifest['summary']}</p>"
                   f"<p><small>{p.manifest['discipline']} · TDQS {score} {'✓' if ok else '✗'}</small></p>"
                   f"<p><small>tools: {tools}</small></p>"
                   f"<code>{BASE_URL}/mcp/{p.id}</code></div>")
     return (f"<html><head><title>MCP-Host — the iStore for MCPs</title>"
             f"<style>body{{font-family:system-ui;max-width:880px;margin:2rem auto}}"
-            f".card{{border:1px solid #ddd;border-radius:8px;padding:1rem;margin:1rem 0}}</style></head>"
+            f".card{{border:1px solid #ddd;border-radius:8px;padding:1rem;margin:1rem 0}}"
+            f".demo-card{{opacity:.75;border-style:dashed}}"
+            f".demo,.live{{font-size:.6em;vertical-align:middle;padding:.15em .5em;border-radius:1em;color:#fff}}"
+            f".demo{{background:#b8860b}}.live{{background:#2e7d32}}</style></head>"
             f"<body><h1>MCP-Host</h1><p>The iStore for MCPs — {len(gw.providers())} providers hosted.</p>"
             f"{cards}<p><a href='/inspector'>Inspector</a> · <a href='/admin/usage'>Usage</a></p></body></html>")
