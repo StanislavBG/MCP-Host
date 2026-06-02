@@ -17,12 +17,23 @@ builders are pure functions so they're unit-testable without a database.
 from __future__ import annotations
 
 import json
+import logging
+import os
 import threading
 import time
 from typing import Any
 
 from mcp_host.data.store import Entitlement, ISO, ProviderRow, hash_key
 from mcp_host.data.tenant import IsolationError, TenantManager
+
+logger = logging.getLogger("mcp-host")
+
+# Cold/serverless Postgres (Replit/Neon) suspends when idle and the FIRST connect after a deploy
+# can fail or race the DB's wake-up. Retry with backoff so a transient hiccup can't kill boot.
+# Total wait budget is ~sum(delays); tunable via env for slow/cold tiers.
+_CONNECT_TIMEOUT = int(os.environ.get("MCP_HOST_PG_CONNECT_TIMEOUT", "10"))  # seconds per attempt
+_CONNECT_RETRIES = int(os.environ.get("MCP_HOST_PG_CONNECT_RETRIES", "6"))   # attempts after the first
+_CONNECT_BACKOFF = (1, 2, 4, 8, 15, 15)  # seconds between attempts; last value repeats if retries exceed it
 
 PLATFORM_DDL = [
     "CREATE SCHEMA IF NOT EXISTS platform",
@@ -93,6 +104,43 @@ def tenant_table_ddl(schema: str, table: str, columns: str) -> list[str]:
     ]
 
 
+def _connect_with_retry(dsn: str):  # pragma: no cover - needs a live DB
+    """Open the shared connection, retrying transient failures with backoff.
+
+    A cold/suspended serverless DB, a DNS blip, or "the database system is starting up" on the
+    first post-deploy connect would otherwise raise out of the app's lifespan and abort startup
+    (the edge then serves a bare 500). We retry a bounded number of times, then re-raise the last
+    error loud — we do NOT silently fall back to ephemeral storage in a Postgres deploy.
+
+    Time: O(retries); wall-clock bounded by sum of backoff delays. Space: O(1).
+    """
+    import psycopg
+    from psycopg.rows import dict_row
+
+    last_exc: Exception | None = None
+    for attempt in range(_CONNECT_RETRIES + 1):
+        try:
+            conn = psycopg.connect(
+                dsn, autocommit=True, row_factory=dict_row, connect_timeout=_CONNECT_TIMEOUT
+            )
+            if attempt:
+                logger.info("[pg] connected after %d retry(ies)", attempt)
+            return conn
+        except Exception as exc:  # psycopg.OperationalError et al. — retry the transient ones
+            last_exc = exc
+            if attempt == _CONNECT_RETRIES:
+                break
+            delay = _CONNECT_BACKOFF[min(attempt, len(_CONNECT_BACKOFF) - 1)]
+            # Don't log the DSN (credentials); log only the error class + message.
+            logger.warning(
+                "[pg] connect attempt %d/%d failed (%s); retrying in %ds",
+                attempt + 1, _CONNECT_RETRIES + 1, type(exc).__name__, delay,
+            )
+            time.sleep(delay)
+    logger.error("[pg] could not connect after %d attempts: %s", _CONNECT_RETRIES + 1, last_exc)
+    raise last_exc  # type: ignore[misc]
+
+
 class PgStore:
     """Control-plane store on Postgres. Mirrors SqliteStore's method surface exactly."""
 
@@ -101,10 +149,7 @@ class PgStore:
         if conn is not None:
             self._conn = conn  # injected (tests)
         else:  # pragma: no cover - needs a live DB
-            import psycopg
-            from psycopg.rows import dict_row
-
-            self._conn = psycopg.connect(dsn, autocommit=True, row_factory=dict_row)
+            self._conn = _connect_with_retry(dsn)
         self._init_schema()
 
     def _exec(self, sql: str, params: tuple = ()):
