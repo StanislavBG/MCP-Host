@@ -11,6 +11,7 @@ Run: uvicorn mcp_host.server:app --host 0.0.0.0 --port 8080
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import time
@@ -175,8 +176,13 @@ async def audit_and_security(request: Request, call_next):
 
 @app.get("/health")
 async def health(request: Request):
-    gw: Gateway = request.app.state.gw
-    problems = getattr(request.app.state, "preflight", [])
+    return _health_payload(request.app)
+
+
+def _health_payload(app: FastAPI) -> dict:
+    """The /health body. Shared by the JSON endpoint and the storefront so they never drift."""
+    gw: Gateway = app.state.gw
+    problems = getattr(app.state, "preflight", [])
     backend = getattr(gw.store, "backend", "unknown")
     degraded = bool(problems) or "unreachable" in backend
     return {"status": "ok" if not degraded else "degraded",
@@ -294,10 +300,11 @@ async def inspector(request: Request):
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
     gw: Gateway = request.app.state.gw
-    backend = getattr(gw.store, "backend", "unknown")
-    healthy = "unreachable" not in backend and not getattr(request.app.state, "preflight", [])
-    status_dot = "#2e7d32" if healthy else "#b8860b"
-    status_word = "ok" if healthy else "degraded"
+    h = _health_payload(request.app)
+    backend = h["backend"]
+    status_word = h["status"]
+    status_dot = "#2e7d32" if status_word == "ok" else "#b8860b"
+    health_json = json.dumps(h, indent=2)
     cards = ""
     for p in gw.providers():
         ok, score, _ = passes(p)
@@ -317,10 +324,15 @@ async def index(request: Request):
             f".demo,.live{{font-size:.6em;vertical-align:middle;padding:.15em .5em;border-radius:1em;color:#fff}}"
             f".demo{{background:#b8860b}}.live{{background:#2e7d32}}"
             f".meta{{color:#666;font-size:.85em}}.dot{{display:inline-block;width:.6em;height:.6em;"
-            f"border-radius:50%;background:{status_dot};margin-right:.4em}}</style></head>"
+            f"border-radius:50%;background:{status_dot};margin-right:.4em}}"
+            f"pre.health{{background:#0e1628;color:#d7e3f4;padding:1rem;border-radius:8px;"
+            f"overflow:auto;font-size:.8em}}</style></head>"
             f"<body><h1>MCP-Host</h1>"
             f"<p class=meta><span class=dot></span><b>{status_word}</b> · v{__version__} "
             f"(build {BUILD_ID}) · backend {backend} · {len(gw.providers())} providers hosted</p>"
             f"<p>The iStore for MCPs.</p>"
-            f"{cards}<p class=meta><a href='/health'>health</a> · <a href='/inspector'>Inspector</a> "
+            f"<h3>Health <small class=meta>(<a href='/health'>/health</a>)</small></h3>"
+            f"<pre class=health>{health_json}</pre>"
+            f"<h3>Providers</h3>{cards}"
+            f"<p class=meta><a href='/health'>health</a> · <a href='/inspector'>Inspector</a> "
             f"· <a href='/admin/usage'>Usage</a></p></body></html>")
