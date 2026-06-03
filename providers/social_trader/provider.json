@@ -8,6 +8,7 @@
   "homepage": "https://github.com/StanislavBG/social-signals-trader",
   "demo": true,
   "owner_namespace": "io.github.StanislavBG",
+  "owner": "StanislavBG",
   "transport": "streamable-http",
   "auth": { "modes": ["oauth2.1", "api_key"], "scopes": ["trader:read", "trader:subscribe"] },
   "data": { "postgres_schema": "trader" },

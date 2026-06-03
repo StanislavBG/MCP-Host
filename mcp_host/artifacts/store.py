@@ -87,3 +87,16 @@ class ArtifactStore:
         if not p.exists():
             return None
         return hashlib.sha256(p.read_bytes()).hexdigest()
+
+    def size(self, provider_id: str, name: str) -> int | None:
+        """Byte size of a committed artifact, or None if it does not exist."""
+        p = self.root / provider_id / name
+        return p.stat().st_size if p.exists() else None
+
+    def delete(self, provider_id: str, name: str) -> bool:
+        """Remove a committed artifact's bytes. Returns True if something was deleted."""
+        p = self.root / provider_id / name
+        if p.exists():
+            p.unlink()
+            return True
+        return False

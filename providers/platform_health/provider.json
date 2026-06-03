@@ -7,6 +7,7 @@
   "summary": "Live health, status and catalog for the MCP-Host platform itself — the first-party monitoring MCP for the whole store.",
   "homepage": "https://github.com/StanislavBG/MCP-Host",
   "owner_namespace": "io.github.StanislavBG",
+  "owner": "StanislavBG",
   "demo": false,
   "transport": "streamable-http",
   "auth": { "modes": ["oauth2.1", "api_key"], "scopes": ["platform:read"] },

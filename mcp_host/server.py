@@ -23,18 +23,26 @@ from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 
 from mcp_host.artifacts.store import ArtifactStore, verify_upload_auth
+from mcp_host.auth.principal import verify_token
 from mcp_host.billing.x402 import StubFacilitator
 from mcp_host.data.factory import make_backends
 from mcp_host.data.store import Entitlement
 from mcp_host.gateway.router import Gateway, GatewayConfig
 from mcp_host.registry.serverjson import to_server_json
 from mcp_host.registry.tdqs import passes
+from mcp_host.sdk import ToolError
 
 BASE_URL = os.environ.get("MCP_HOST_BASE_URL", "https://mcp-host")
 SIGNING_KEY = os.environ.get("MCP_HOST_SIGNING_KEY", "dev-signing-key")
 WALLET = os.environ.get("WALLET_ADDRESS", "0xSHARED")
 ADMIN_KEY = os.environ.get("UPLOAD_SECRET", "")
 ARTIFACT_ROOT = os.environ.get("MCP_HOST_ARTIFACTS", "/tmp/mcp-host-artifacts")
+# Principal id of the platform super-admin: may wield any provider's :admin scope and upload
+# any provider's artifacts. Per-provider ownership lives in each provider.json `owner` field.
+PLATFORM_OWNER = os.environ.get("MCP_HOST_PLATFORM_OWNER", "StanislavBG")
+# Providers whose scopes are authorized per-target IN-BODY (not by the plan-entitlement table),
+# so their scopes are granted to every plan and the tool body enforces ownership.
+OWNER_MANAGED_PROVIDERS = {"platform-publisher"}
 
 # Default entitlement matrix: free plan gets read scopes broadly; paid scopes go to 'pro'.
 DEFAULT_PLANS = {
@@ -50,16 +58,21 @@ def mask_ip(ip: str) -> str:
 
 def build_gateway() -> Gateway:
     store, tenant = make_backends()
-    gw = Gateway(store, GatewayConfig(BASE_URL, SIGNING_KEY, WALLET, ADMIN_KEY),
+    gw = Gateway(store, GatewayConfig(BASE_URL, SIGNING_KEY, WALLET, ADMIN_KEY, PLATFORM_OWNER),
                  facilitator=StubFacilitator(), tenant=tenant)
     from providers import load_pilots
 
     for provider, secrets in load_pilots():
         gw.mount(provider, secrets)
-        # Seed entitlements for each declared scope across plans.
+        owner_managed = provider.id in OWNER_MANAGED_PROVIDERS
+        # Seed entitlements per declared scope across plans. :admin scopes are NEVER seeded —
+        # the gateway authorizes them by ownership, not plan. Owner-managed providers grant their
+        # (non-admin) scopes to every plan because the tool body enforces per-target ownership.
         for scope in provider.manifest["auth"]["scopes"]:
+            if scope.endswith(":admin"):
+                continue
             for plan, cfg in DEFAULT_PLANS.items():
-                if scope.endswith(cfg["scopes_suffix"]):
+                if scope.endswith(cfg["scopes_suffix"]) or owner_managed:
                     store.set_entitlement(Entitlement(plan, provider.id, scope,
                                                       cfg["quota"], cfg["rate"]))
     return gw
@@ -110,6 +123,9 @@ async def lifespan(app: FastAPI):
         "backend": getattr(gw.store, "backend", "unknown"),
         "started_at": started_at,
         "config_warnings": app.state.preflight,
+        "artifacts": app.state.artifacts,
+        "artifact_root": ARTIFACT_ROOT,
+        "platform_owner": PLATFORM_OWNER,
     }
     for p in gw.providers():
         if hasattr(p, "bind_host"):
@@ -197,18 +213,43 @@ async def provider_data(provider_id: str, request: Request):
     return p.catalog(ctx)
 
 
+def _authorize_upload(headers: dict, provider, canonical_uri: str) -> bool:
+    """Upload is allowed for the platform super-admin (UPLOAD_SECRET) OR the provider's owner
+    (a bearer token resource-bound to this provider whose sub == the declared owner). Both checks
+    are constant-time / signature-verified; we never trust a client-claimed identity."""
+    auth = headers.get("authorization") or headers.get("Authorization") or ""
+    if verify_upload_auth(auth, ADMIN_KEY):
+        return True
+    if auth.lower().startswith("bearer "):
+        try:
+            principal = verify_token(SIGNING_KEY, auth[7:].strip(), canonical_uri)
+        except ToolError:
+            return False
+        owner = provider.manifest.get("owner")
+        return bool(owner and principal.id == owner) or principal.id == PLATFORM_OWNER
+    return False
+
+
 @app.post("/mcp/{provider_id}/upload/{artifact}")
 async def upload_artifact(provider_id: str, artifact: str, request: Request):
-    """HMAC-bearer authenticated artifact upload (single-shot). Chunked variant adds X-Chunk-* headers."""
-    if not verify_upload_auth(request.headers.get("authorization"), ADMIN_KEY):
-        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    """Owner-authenticated artifact upload (single-shot). The provider owner (or platform
+    super-admin) pushes bytes for an artifact DECLARED in that provider's provider.json."""
     gw: Gateway = request.app.state.gw
-    if not gw.provider(provider_id):
+    provider = gw.provider(provider_id)
+    if not provider:
         return JSONResponse({"error": "unknown provider"}, status_code=404)
+    if not _authorize_upload(dict(request.headers), provider, gw.canonical_uri(provider_id)):
+        return JSONResponse({"error": "unauthorized — owner token or UPLOAD_SECRET required"}, status_code=401)
+    declared = {a["name"] for a in provider.manifest.get("data", {}).get("artifacts", [])}
+    if artifact not in declared:
+        return JSONResponse(
+            {"error": f"artifact '{artifact}' is not declared in {provider_id}'s provider.json"},
+            status_code=400)
+    kind = next(a.get("kind", "blob") for a in provider.manifest["data"]["artifacts"] if a["name"] == artifact)
     store: ArtifactStore = request.app.state.artifacts
     data = await request.body()
     nbytes = store.put(provider_id, artifact, data)
-    gw.store.record_artifact(provider_id, artifact, "blob", nbytes,
+    gw.store.record_artifact(provider_id, artifact, kind, nbytes,
                              f"{ARTIFACT_ROOT}/{provider_id}/{artifact}")
     return {"status": "ok", "bytes": nbytes, "sha256": store.sha256(provider_id, artifact)}
 

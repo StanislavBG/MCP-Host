@@ -31,6 +31,7 @@ class GatewayConfig:
     signing_key: str = "dev-signing-key"
     wallet_address: str = "0xSHARED"
     admin_key: str = ""
+    platform_owner: str = ""  # principal id of the platform super-admin (may wield any :admin scope)
 
 
 @dataclass
@@ -124,12 +125,23 @@ class Gateway:
         scope = scope_map[tool_name]
         price = provider.price_map().get(tool_name, "0.00")
 
-        # 2. Entitlement.
-        try:
-            entitlements.check(self.store, principal, provider_id, tool_name, scope)
-        except ToolError as e:
-            self.store.record_usage(provider_id, tool_name, principal.id, 0, False, e.http_status)
-            return self._err(req_id, e, principal.id)
+        # 2. Entitlement — OR, for :admin-scoped tools, owner-only authorization.
+        # An :admin scope is the owner's private control surface for their OWN MCP: only the
+        # provider's declared owner (or the platform super-admin) may call it. Ownership is the
+        # grant, so we bypass the plan-entitlement table for these (and never seed them).
+        if scope.endswith(":admin"):
+            owner = provider.manifest.get("owner")
+            if not (owner and principal.id == owner) and principal.id != self.cfg.platform_owner:
+                e = ToolError(ErrorCode.FORBIDDEN_SCOPE,
+                              f"Tool '{tool_name}' is owner-only; principal does not own '{provider_id}'")
+                self.store.record_usage(provider_id, tool_name, principal.id, 0, False, e.http_status)
+                return self._err(req_id, e, principal.id)
+        else:
+            try:
+                entitlements.check(self.store, principal, provider_id, tool_name, scope)
+            except ToolError as e:
+                self.store.record_usage(provider_id, tool_name, principal.id, 0, False, e.http_status)
+                return self._err(req_id, e, principal.id)
 
         # 3. Billing.
         try:

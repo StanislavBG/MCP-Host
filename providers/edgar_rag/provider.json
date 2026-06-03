@@ -8,6 +8,7 @@
   "homepage": "https://github.com/StanislavBG/edgar-rag",
   "demo": true,
   "owner_namespace": "io.github.StanislavBG",
+  "owner": "StanislavBG",
   "transport": "streamable-http",
   "auth": { "modes": ["oauth2.1", "api_key"], "scopes": ["edgar:read", "edgar:search"] },
   "data": {

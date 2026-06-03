@@ -14,6 +14,7 @@ import os
 
 from providers.edgar_rag.provider import EdgarRagProvider
 from providers.platform_health.provider import PlatformHealthProvider
+from providers.platform_publisher.provider import PlatformPublisherProvider
 from providers.signal_builder.provider import SignalBuilderProvider
 from providers.social_trader.provider import SocialTraderProvider
 
@@ -22,6 +23,7 @@ def load_pilots():
     """Return [(provider_instance, secrets), ...] for every mounted provider."""
     return [
         (PlatformHealthProvider(), {}),
+        (PlatformPublisherProvider(), {}),
         (EdgarRagProvider(), {"SEC_USER_AGENT": os.environ.get("SEC_USER_AGENT", "")}),
         (SignalBuilderProvider(), {}),
         (SocialTraderProvider(), {

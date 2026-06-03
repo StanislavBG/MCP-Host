@@ -38,9 +38,10 @@ _CONNECT_BACKOFF = (1, 2, 4, 8, 15, 15)  # seconds between attempts; last value 
 PLATFORM_DDL = [
     "CREATE SCHEMA IF NOT EXISTS platform",
     """CREATE TABLE IF NOT EXISTS platform.providers(
-        id TEXT PRIMARY KEY, display_name TEXT, discipline TEXT, version TEXT,
+        id TEXT PRIMARY KEY, display_name TEXT, discipline TEXT, version TEXT, owner TEXT,
         manifest_json JSONB NOT NULL, status TEXT NOT NULL DEFAULT 'active',
         created_at TIMESTAMPTZ NOT NULL DEFAULT now())""",
+    "ALTER TABLE platform.providers ADD COLUMN IF NOT EXISTS owner TEXT",
     """CREATE TABLE IF NOT EXISTS platform.tools(
         provider_id TEXT NOT NULL, name TEXT NOT NULL, scope TEXT NOT NULL,
         price_usdc TEXT NOT NULL, annotations_json JSONB,
@@ -173,12 +174,12 @@ class PgStore:
     def register_provider(self, manifest: dict[str, Any]) -> None:
         with self.lock:
             self._conn.execute(
-                "INSERT INTO platform.providers(id, display_name, discipline, version, manifest_json, status)"
-                " VALUES(%s,%s,%s,%s,%s,'active') ON CONFLICT (id) DO UPDATE SET"
+                "INSERT INTO platform.providers(id, display_name, discipline, version, owner, manifest_json, status)"
+                " VALUES(%s,%s,%s,%s,%s,%s,'active') ON CONFLICT (id) DO UPDATE SET"
                 " display_name=EXCLUDED.display_name, discipline=EXCLUDED.discipline,"
-                " version=EXCLUDED.version, manifest_json=EXCLUDED.manifest_json",
+                " version=EXCLUDED.version, owner=EXCLUDED.owner, manifest_json=EXCLUDED.manifest_json",
                 (manifest["id"], manifest["display_name"], manifest["discipline"],
-                 manifest["version"], json.dumps(manifest)),
+                 manifest["version"], manifest.get("owner"), json.dumps(manifest)),
             )
             self._conn.execute("DELETE FROM platform.tools WHERE provider_id=%s", (manifest["id"],))
             for t in manifest["tools"]:
@@ -322,6 +323,13 @@ class PgStore:
             "SELECT * FROM platform.artifacts WHERE provider_id=%s AND name=%s", (provider_id, name)
         )
         return dict(r) if r else None
+
+    def list_artifacts(self, provider_id: str) -> list[dict[str, Any]]:
+        return [dict(r) for r in self._all(
+            "SELECT * FROM platform.artifacts WHERE provider_id=%s ORDER BY name", (provider_id,))]
+
+    def delete_artifact(self, provider_id: str, name: str) -> None:
+        self._exec("DELETE FROM platform.artifacts WHERE provider_id=%s AND name=%s", (provider_id, name))
 
 
 class PgTenantDB:

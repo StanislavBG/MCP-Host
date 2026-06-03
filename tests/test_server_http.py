@@ -32,7 +32,7 @@ def test_health_lists_providers(client):
     r = client.get("/health")
     assert r.status_code == 200
     assert set(r.json()["providers"]) == {
-        "platform-health", "edgar-rag", "signal-builder", "social-trader"}
+        "platform-health", "platform-publisher", "edgar-rag", "signal-builder", "social-trader"}
 
 
 def test_index_renders(client):
@@ -83,11 +83,11 @@ def test_paid_feed_402_then_paid(client):
 
 def test_artifact_upload_auth(client):
     # wrong secret rejected
-    r = client.post("/mcp/edgar-rag/upload/vectors.bin", content=b"data",
+    r = client.post("/mcp/edgar-rag/upload/vectors", content=b"data",
                     headers={"Authorization": "Bearer wrong"})
     assert r.status_code == 401
-    # correct secret accepted
-    r2 = client.post("/mcp/edgar-rag/upload/vectors.bin", content=b"data",
+    # correct super-admin secret (UPLOAD_SECRET) accepted, against a DECLARED artifact
+    r2 = client.post("/mcp/edgar-rag/upload/vectors", content=b"data",
                      headers={"Authorization": "Bearer admin"})
     assert r2.status_code == 200 and r2.json()["bytes"] == 4
 

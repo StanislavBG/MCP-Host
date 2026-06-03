@@ -66,7 +66,7 @@ class SqliteStore:
             """
             CREATE TABLE IF NOT EXISTS providers(
                 id TEXT PRIMARY KEY, display_name TEXT, discipline TEXT, version TEXT,
-                manifest_json TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'active',
+                owner TEXT, manifest_json TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'active',
                 created_at TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS tools(
                 provider_id TEXT NOT NULL, name TEXT NOT NULL, scope TEXT NOT NULL,
@@ -106,10 +106,10 @@ class SqliteStore:
 
         c = self._conn
         c.execute(
-            "INSERT OR REPLACE INTO providers(id, display_name, discipline, version, manifest_json, status, created_at)"
-            " VALUES(?,?,?,?,?,?,?)",
+            "INSERT OR REPLACE INTO providers(id, display_name, discipline, version, owner, manifest_json, status, created_at)"
+            " VALUES(?,?,?,?,?,?,?,?)",
             (manifest["id"], manifest["display_name"], manifest["discipline"], manifest["version"],
-             json.dumps(manifest), "active", now_iso()),
+             manifest.get("owner"), json.dumps(manifest), "active", now_iso()),
         )
         c.execute("DELETE FROM tools WHERE provider_id=?", (manifest["id"],))
         for t in manifest["tools"]:
@@ -254,6 +254,16 @@ class SqliteStore:
             "SELECT * FROM artifacts WHERE provider_id=? AND name=?", (provider_id, name)
         ).fetchone()
         return dict(r) if r else None
+
+    def list_artifacts(self, provider_id: str) -> list[dict[str, Any]]:
+        rows = self._conn.execute(
+            "SELECT * FROM artifacts WHERE provider_id=? ORDER BY name", (provider_id,)
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def delete_artifact(self, provider_id: str, name: str) -> None:
+        self._conn.execute("DELETE FROM artifacts WHERE provider_id=? AND name=?", (provider_id, name))
+        self._conn.commit()
 
 
 def make_store() -> SqliteStore:

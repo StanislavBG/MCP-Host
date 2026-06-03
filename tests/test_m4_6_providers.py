@@ -46,7 +46,7 @@ def _payload(res):
 
 def test_all_pilots_mount_and_list(gw):
     assert {p.id for p in gw.providers()} == {
-        "platform-health", "edgar-rag", "signal-builder", "social-trader"}
+        "platform-health", "platform-publisher", "edgar-rag", "signal-builder", "social-trader"}
     r = gw.handle("edgar-rag", {"id": 1, "method": "tools/list"}, _hdr("edgar-rag", ["edgar:read"]))
     names = {t["name"] for t in r.body["result"]["tools"]}
     assert names == {"search_filings", "list_companies", "get_filing", "get_data_catalog"}

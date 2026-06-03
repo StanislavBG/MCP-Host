@@ -1,0 +1,32 @@
+{
+  "$schema": "https://mcp-host/schemas/provider.schema.json",
+  "id": "platform-publisher",
+  "display_name": "MCP-Host Publisher",
+  "discipline": "platform-publishing",
+  "version": "0.1.0",
+  "summary": "Owner-only data publishing for hosted MCPs: list, finalize and delete the artifacts (vectors/blobs) backing your provider. The bytes upload over the authenticated chunked HTTP endpoint.",
+  "homepage": "https://github.com/StanislavBG/MCP-Host",
+  "owner_namespace": "io.github.StanislavBG",
+  "owner": "StanislavBG",
+  "demo": false,
+  "transport": "streamable-http",
+  "auth": { "modes": ["oauth2.1", "api_key"], "scopes": ["publisher:write"] },
+  "data": { "postgres_schema": "platform_publisher" },
+  "tools": [
+    { "name": "list_datasets", "scope": "publisher:write", "price_usdc": "0.00",
+      "description": "List the artifacts declared by a provider you own, each with its upload status: bytes stored, sha256, and last upload time, or 'pending' if not yet uploaded.",
+      "annotations": { "readOnlyHint": true } },
+    { "name": "get_upload_target", "scope": "publisher:write", "price_usdc": "0.00",
+      "description": "Return the authenticated chunked HTTP upload URL and instructions for pushing the bytes of one declared artifact of a provider you own. You must be the provider owner.",
+      "annotations": { "readOnlyHint": true } },
+    { "name": "finalize_upload", "scope": "publisher:write", "price_usdc": "0.00",
+      "description": "Finalize a previously uploaded artifact for a provider you own: verify the bytes are present, then record their size and sha256 so the provider can serve them. You must be the provider owner.",
+      "annotations": { "readOnlyHint": false, "idempotentHint": true } },
+    { "name": "delete_dataset", "scope": "publisher:write", "price_usdc": "0.00",
+      "description": "Delete the uploaded bytes and recorded metadata of one artifact for a provider you own. The artifact declaration in provider.json is unaffected. You must be the provider owner.",
+      "annotations": { "readOnlyHint": false, "destructiveHint": true } }
+  ],
+  "limits": { "rate_per_min": 60, "max_request_kb": 16 },
+  "syndication": { "official_registry": true, "glama": true, "mcp_so": true, "pulsemcp": true },
+  "health": "/mcp/platform-publisher/health"
+}
