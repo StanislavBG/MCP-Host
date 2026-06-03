@@ -78,10 +78,17 @@ Metering still records every call to `platform.usage` regardless.
 ## 5. Verify the deploy
 
 - `GET /health` → expect `{"status":"ok", "backend":"postgres", "config_warnings":[], "providers":[...]}`.
-  If `status` is `"degraded"`, read `config_warnings` (and the deploy logs `[preflight]` lines) and
-  fix the named secret.
-- `GET /` → storefront lists the mounted providers with their TDQS scores.
-- `GET /mcp/edgar-rag/.well-known/mcp.json` → server card; confirm the `remotes[].url` is your real domain.
+  The `providers` list MUST include the first-party `platform-health` and `platform-publisher`
+  (plus the demo pilots). If it shows only `edgar-rag/signal-builder/social-trader`, the
+  deployment is running STALE code — see §8.
+  - `backend` of `"sqlite-memory (postgres unreachable)"` means the app fell back to EPHEMERAL
+    storage (the host no longer crash-loops on a bad DB) — connect the production database (§3) and
+    redeploy to get `"postgres"`. `status` is `"degraded"` whenever the backend is unreachable or
+    any `config_warnings` are present.
+- `GET /mcp/platform-health/health` → `{"status":"ok",...}`; this is our own monitoring MCP and the
+  quickest end-to-end "is a hosted MCP serving?" check.
+- `GET /` → storefront lists the mounted providers with TDQS scores; demos are badged "demo".
+- `GET /mcp/platform-health/.well-known/mcp.json` → server card; confirm `remotes[].url` is your real domain.
 - Optional, validate the live DB once from the Repl shell:
   `MCP_HOST_TEST_PG="$DATABASE_URL" python -m pytest tests/test_pg_backend.py`
   (runs the gated control-plane + cross-tenant RLS isolation tests against your real database).
@@ -100,7 +107,29 @@ Metering still records every call to `platform.usage` regardless.
 ## 7. After the host is up — onboarding other agents/MCPs
 
 Tell each provider dev-agent: *"Conform to the MCP-Host Provider Protocol in `ONBOARDING.md`
-(subclass `Provider`, write `provider.json`), pass `mcp-host validate`, then deploy + upload +
-syndicate against this host."* The host gives them transport, OAuth, the shared wallet, RLS data
-isolation, metering, and registry syndication for free. Their independent data lives in their own
-`<provider>` Postgres schema (relational) and their own artifact bucket (vectors/blobs).
+(subclass `Provider`, write `provider.json` — including an `owner` principal id), pass
+`mcp-host validate`, then deploy + upload + syndicate against this host."* The host gives them
+transport, OAuth, the shared wallet, RLS data isolation, metering, and registry syndication for
+free. Their independent data lives in their own `<provider>` Postgres schema (relational) and
+their own artifact bucket (vectors/blobs), uploaded owner-only via `platform-publisher` +
+`POST /mcp/<id>/upload/<artifact>`.
+
+---
+
+## 8. Updating a running deployment (IMPORTANT — the workspace is not a git checkout)
+
+The Repl workspace was seeded from a one-time GitHub zip (Replit blocks `git clone` over HTTPS),
+so it is **loose files, not a clone of `main`**. Pushing to GitHub does NOT update the
+deployment — a redeploy just rebuilds whatever is in the workspace. To ship new commits you must
+first sync the workspace to `main`, then redeploy. In the Repl **Shell**:
+
+```sh
+git -C ~/workspace fetch origin && git -C ~/workspace reset --hard origin/main 2>/dev/null \
+ || { curl -fsSL https://codeload.github.com/StanislavBG/MCP-Host/zip/refs/heads/main -o /tmp/mh.zip \
+      && unzip -oq /tmp/mh.zip -d /tmp/mh \
+      && cp -rf /tmp/mh/MCP-Host-main/. ~/workspace/ && echo "synced to main"; }
+```
+
+Then click **Redeploy** and re-run the §5 checks (the `providers` list must include
+`platform-health` and `platform-publisher`). This also replaces any ad-hoc in-workspace edits with
+the repo version, keeping git the source of truth.

@@ -6,8 +6,14 @@ Protocol in exchange for shared services (auth, billing/wallet, database, syndic
 audit, discovery). The host owns auth, billing, data isolation, metering, and syndication.
 Providers own only their tools, their `<provider>.*` Postgres schema, and their artifacts.
 
-Pilot providers: `edgar-rag` (SEC EDGAR RAG — the reference implementation), `signal-builder`
-(per-ticker social metrics/sentiment), `social-trader` (publishes buy/sell signals).
+First-party platform providers (real, owned by the platform): `platform-health` (live host
+status / catalog / ping — the first production-hosted MCP, no external data) and
+`platform-publisher` (owner-only data publishing for hosted MCPs). Both get a live host view
+injected at boot via `provider.bind_host(gw, meta)` — third-party providers never receive this.
+
+Demo providers (`"demo": true`, sample data, badged "demo" on the storefront): `edgar-rag`
+(SEC EDGAR RAG — the SDK reference implementation), `signal-builder` (per-ticker social
+metrics/sentiment), `social-trader` (publishes buy/sell signals).
 
 ## Architecture in one breath
 
@@ -28,6 +34,13 @@ Internet ──HTTPS(Streamable HTTP + OAuth2.1)──► Gateway ──► /mcp
 - A provider is defined by ONE `provider.json` (validated against `schemas/provider.schema.json`).
   Routes, scopes, prices, the Postgres schema name, and rate limits are DERIVED from it —
   never hardcoded anywhere else.
+- Ownership: `provider.json` declares an `owner` (principal id). Only that owner — or the
+  platform super-admin (`MCP_HOST_PLATFORM_OWNER`) — may call the provider's `<ns>:admin`-scoped
+  tools or upload its artifacts. The gateway authorizes `:admin` scopes by OWNERSHIP, not by plan
+  (entitlement table bypassed; `:admin` scopes are never seeded). Consumers only ever hold the
+  read/write/subscribe scopes their plan grants. Artifact uploads must target an artifact
+  DECLARED in `data.artifacts`; bytes go over `POST /mcp/<id>/upload/<artifact>` authenticated by
+  an owner bearer (resource-bound, `sub == owner`) or the `UPLOAD_SECRET` super-admin key.
 - Subclass `mcp_host.sdk.Provider`. Implement tools as `@tool` methods. Do NOT implement your
   own transport, OAuth, billing, audit, or registry calls — the host provides them.
 - Transport is MCP Streamable HTTP. JSON-RPC methods: `initialize` / `tools/list` / `tools/call`
