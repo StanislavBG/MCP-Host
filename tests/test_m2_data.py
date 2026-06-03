@@ -74,6 +74,35 @@ def test_tenant_isolation():
     assert s2.query("shared") == []
 
 
+def test_tenant_delete_all_clears_only_caller():
+    """replace-mode primitive: delete() with no where clears the caller's rows and no one else's."""
+    conn = open_tenant_conn()
+    a = TenantDB(conn, "trader")
+    b = TenantDB(conn, "signal")
+    a.create_table("signals", "ticker TEXT")
+    b.create_table("signals", "ticker TEXT")
+    a.insert("signals", {"ticker": "NVDA"})
+    a.insert("signals", {"ticker": "TSLA"})
+    b.insert("signals", {"ticker": "GME"})
+
+    removed = a.delete("signals")
+    assert removed == 2
+    assert a.query("signals") == []
+    assert a.raw_count_all("signals") == 0           # caller's physical table emptied
+    assert [r["ticker"] for r in b.query("signals")] == ["GME"]  # other tenant untouched
+
+
+def test_tenant_delete_where_subset():
+    conn = open_tenant_conn()
+    t = TenantDB(conn, "trader")
+    t.create_table("signals", "ticker TEXT")
+    for sym in ("NVDA", "TSLA", "AAPL"):
+        t.insert("signals", {"ticker": sym})
+    removed = t.delete("signals", "ticker=?", ("TSLA",))
+    assert removed == 1
+    assert {r["ticker"] for r in t.query("signals")} == {"NVDA", "AAPL"}
+
+
 def test_tenant_rejects_manual_tenant_id():
     conn = open_tenant_conn()
     t = TenantDB(conn, "edgar")

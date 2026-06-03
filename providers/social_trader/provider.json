@@ -3,14 +3,14 @@
   "id": "social-trader",
   "display_name": "Social Signals Trader",
   "discipline": "trade-signal-publishing",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "summary": "Publishes buy/sell signals matching a managed portfolio for consumers to subscribe to and act on.",
   "homepage": "https://github.com/StanislavBG/social-signals-trader",
   "demo": true,
   "owner_namespace": "io.github.StanislavBG",
   "owner": "StanislavBG",
   "transport": "streamable-http",
-  "auth": { "modes": ["oauth2.1", "api_key"], "scopes": ["trader:read", "trader:subscribe"] },
+  "auth": { "modes": ["oauth2.1", "api_key"], "scopes": ["trader:read", "trader:subscribe", "trader:admin"] },
   "data": { "postgres_schema": "trader" },
   "tools": [
     { "name": "signals.feed", "scope": "trader:subscribe", "price_usdc": "0.05",
@@ -21,7 +21,10 @@
       "annotations": { "readOnlyHint": true } },
     { "name": "portfolio.positions", "scope": "trader:read", "price_usdc": "0.00",
       "description": "Show the current published portfolio positions, sizes and entry context that the signals are derived from.",
-      "annotations": { "readOnlyHint": true } }
+      "annotations": { "readOnlyHint": true } },
+    { "name": "signals.ingest", "scope": "trader:admin", "price_usdc": "0.00",
+      "description": "Owner-only: replace or append the live signal/position rows this MCP publishes, so the off-platform fund can keep the subscriber feed fresh on every fill. Writes the provider's RLS-isolated trader schema.",
+      "annotations": { "readOnlyHint": false, "idempotentHint": true } }
   ],
   "limits": { "rate_per_min": 60, "max_request_kb": 50 },
   "syndication": { "official_registry": true, "glama": true, "mcp_so": true, "pulsemcp": true },

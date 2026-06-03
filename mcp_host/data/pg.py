@@ -371,6 +371,17 @@ class PgTenantDB:
             ).fetchall()
         return [dict(r) for r in rows]
 
+    def delete(self, table: str, where: str = "", params: tuple = ()) -> int:
+        """Tenant-scoped DELETE. RLS already pins rows to this tenant (the GUC is set first), so
+        an empty `where` clears only this tenant's rows. Returns rows deleted. %s placeholders."""
+        clause = f"WHERE {where}" if where else ""
+        with self._store.lock:
+            self._set_tenant()
+            cur = self._store._conn.execute(
+                f"DELETE FROM {self.schema}.{_ident(table)} {clause}", tuple(params)
+            )
+        return cur.rowcount if cur.rowcount is not None else 0
+
 
 class PgTenantManager(TenantManager):
     def __init__(self, store: PgStore) -> None:

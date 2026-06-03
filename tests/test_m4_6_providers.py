@@ -93,3 +93,79 @@ def test_trader_feed_is_priced_and_gated(gw):
 def test_trader_history_free(gw):
     res = _call(gw, "social-trader", "signals.history", {}, ["trader:read"])
     assert res.status == 200 and _payload(res)["count"] >= 1
+
+
+# ---- enhancement 001: owner live-signal ingest ------------------------------
+def _owner_call(gw, tool, args, sub="StanislavBG"):
+    """Call a social-trader tool as the declared owner (gateway :admin gate)."""
+    hdr = {"authorization": f"Bearer {mint_token('k', sub, 'pro', ['trader:admin'], 'https://mcp-host/mcp/social-trader')}"}
+    return gw.handle("social-trader", {"id": 1, "method": "tools/call",
+                                       "params": {"name": tool, "arguments": args}}, hdr)
+
+
+_SIG_ROWS = [
+    {"ticker": "HPE", "side": "short", "conviction": 0.7, "rationale": "Short into earnings",
+     "exit_intent": "Cover at open T+1; 10d time-stop", "ts": "2026-06-02T15:00:00+00:00",
+     "status": "OPEN", "outcome_pct": None},
+    {"ticker": "MSFT", "side": "buy", "rationale": "Cloud reaccel", "ts": "2026-06-02T16:00:00+00:00"},
+]
+
+
+def test_trader_ingest_owner_then_reads_live(gw):
+    ing = _owner_call(gw, "signals.ingest", {"dataset": "signals", "mode": "replace", "rows": _SIG_ROWS})
+    assert ing.status == 200
+    p = _payload(ing)
+    assert p["ingested"] == 2 and p["total"] == 2
+
+    # feed (paid+subscribe) now serves MY tickers, newest-first, no outcome_pct
+    feed = _call(gw, "social-trader", "signals.feed", {"limit": 10}, ["trader:subscribe"],
+                 extra={"x-payment": "paid:abc"})
+    fp = _payload(feed)
+    assert [s["ticker"] for s in fp["signals"]] == ["MSFT", "HPE"]
+    assert all("outcome_pct" not in s for s in fp["signals"])
+
+    # history serves the same set WITH outcomes
+    hist = _payload(_call(gw, "social-trader", "signals.history", {}, ["trader:read"]))
+    assert {s["ticker"] for s in hist["signals"]} == {"HPE", "MSFT"}
+    assert any("outcome_pct" in s for s in hist["signals"])
+
+
+def test_trader_ingest_positions_then_read(gw):
+    rows = [{"ticker": "HPE", "side": "short", "weight": 0.04, "entry": "2026-06-02"}]
+    _owner_call(gw, "signals.ingest", {"dataset": "positions", "mode": "replace", "rows": rows})
+    pos = _payload(_call(gw, "social-trader", "portfolio.positions", {}, ["trader:read"]))
+    assert pos["count"] == 1 and pos["positions"][0]["ticker"] == "HPE"
+
+
+def test_trader_ingest_denies_non_owner(gw):
+    res = _owner_call(gw, "signals.ingest",
+                      {"dataset": "signals", "mode": "replace", "rows": _SIG_ROWS}, sub="mallory")
+    assert res.status == 403 and "owner-only" in res.body["error"]["message"]
+    # nothing written -> history still on the static seed (NVDA/TSLA)
+    hist = _payload(_call(gw, "social-trader", "signals.history", {}, ["trader:read"]))
+    assert {s["ticker"] for s in hist["signals"]} == {"NVDA", "TSLA"}
+
+
+def test_trader_ingest_replace_overwrites(gw):
+    _owner_call(gw, "signals.ingest", {"dataset": "signals", "mode": "replace", "rows": _SIG_ROWS})
+    second = _owner_call(gw, "signals.ingest",
+                         {"dataset": "signals", "mode": "replace",
+                          "rows": [{"ticker": "AMD", "side": "buy"}]})
+    assert _payload(second)["total"] == 1  # replaced, not accumulated
+    hist = _payload(_call(gw, "social-trader", "signals.history", {}, ["trader:read"]))
+    assert {s["ticker"] for s in hist["signals"]} == {"AMD"}
+
+
+def test_trader_ingest_append_adds(gw):
+    _owner_call(gw, "signals.ingest", {"dataset": "signals", "mode": "replace", "rows": _SIG_ROWS})
+    app = _owner_call(gw, "signals.ingest",
+                      {"dataset": "signals", "mode": "append",
+                       "rows": [{"ticker": "AMD", "side": "buy"}]})
+    assert _payload(app)["total"] == 3
+
+
+def test_trader_ingest_rejects_bad_row(gw):
+    res = _owner_call(gw, "signals.ingest",
+                      {"dataset": "signals", "mode": "replace",
+                       "rows": [{"ticker": "TOOLONGTICKER", "side": "buy"}]})
+    assert res.status >= 400 and res.body.get("error")

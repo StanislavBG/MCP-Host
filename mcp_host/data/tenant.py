@@ -62,6 +62,22 @@ class TenantDB:
         rows = self._conn.execute(f"SELECT * FROM {self._t(table)} {clause}", args).fetchall()
         return [dict(r) for r in rows]
 
+    def delete(self, table: str, where: str = "", params: Iterable[Any] = ()) -> int:
+        """Tenant-scoped DELETE. Empty `where` clears ALL of this tenant's rows in `table`
+        (the replace-mode primitive); a `where` is ANDed with the tenant filter. Returns the
+        number of rows deleted. Caller MUST use ? placeholders in `where` (no interpolation).
+
+        The table must already exist (create_table first) — DELETE on a missing table raises."""
+        self._guard_name(table)
+        clause = "WHERE tenant_id=?"
+        args: list[Any] = [self.provider_id]
+        if where:
+            clause += f" AND ({where})"
+            args.extend(params)
+        cur = self._conn.execute(f"DELETE FROM {self._t(table)} {clause}", args)
+        self._conn.commit()
+        return cur.rowcount
+
     def raw_count_all(self, table: str) -> int:
         """Test/inspection helper: count rows WITHOUT the tenant filter (proves isolation)."""
         self._guard_name(table)

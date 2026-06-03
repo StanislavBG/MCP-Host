@@ -110,6 +110,62 @@ curl -X POST https://<host>/mcp/<id>/upload/<artifact-name> \
 
 ---
 
+## 4a. Keeping relational data fresh — owner ingest (the owner-write-tool pattern)
+
+Artifacts are for large vector/blob data. For **small, high-frequency rows** an off-platform owner
+needs to keep current (e.g. live trade signals refreshed on every fill), declare an **owner-only
+write tool** scoped `<ns>:admin`. The gateway authorizes `:admin` scopes by **ownership** — only
+the provider's declared `owner` (or the platform super-admin) can call them — so no consumer plan
+can ever reach the tool. The tool body writes through `ctx.tenant_db` like any other; it just runs
+through the normal authenticated, audited, metered `tools/call` path (no new endpoint, no new auth).
+
+`social-trader` is the worked example. Manifest:
+
+```jsonc
+"auth": { "modes": ["oauth2.1","api_key"], "scopes": ["trader:read","trader:subscribe","trader:admin"] },
+"tools": [
+  { "name": "signals.ingest", "scope": "trader:admin", "price_usdc": "0.00",
+    "description": "Owner-only: replace or append the live signal/position rows this MCP publishes…",
+    "annotations": { "readOnlyHint": false, "idempotentHint": true } }
+]
+```
+
+Tool body (abridged — see `providers/social_trader/provider.py`): validate each row through a
+Pydantic model, then `mode="replace"` does `tenant_db.delete(dataset)` + insert; `"append"` inserts.
+The read tools serve `ctx.tenant_db` and fall back to a static seed only while no rows exist.
+
+Refresh from cron / a post-fill hook with the CLI:
+
+```bash
+# 1. obtain a bearer resource-bound to your provider (self-host/dev issuer;
+#    in production your OAuth 2.1 AS issues this — the gateway checks are identical).
+export MCP_HOST_SIGNING_KEY=...                       # the host signing secret
+TOKEN=$(mcp-host token --provider social-trader --sub StanislavBG --scopes trader:admin \
+                       --base-url https://<host>)
+
+# 2. push rows (replace the whole live set on each fill, or --mode append)
+mcp-host ingest social-trader signals ./signals.json --base-url https://<host> --token "$TOKEN"
+#   signals.json: a JSON array of rows, or { "rows": [ ... ] }
+#   add --dry-run to print the exact JSON-RPC request without sending.
+```
+
+Equivalent raw Streamable-HTTP call (what `ingest` POSTs):
+
+```bash
+curl -X POST https://<host>/mcp/social-trader \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"id":1,"method":"tools/call","params":{"name":"signals.ingest",
+       "arguments":{"dataset":"signals","mode":"replace",
+       "rows":[{"ticker":"HPE","side":"short","rationale":"…","exit_intent":"…",
+                "ts":"2026-06-02T15:00:00+00:00","status":"OPEN"}]}}}'
+```
+
+`replace` is idempotent (safe to retry); `append` is not. Keep payloads under your manifest's
+`max_request_kb`. Subscribers then read your live data through the existing `signals.feed`
+(priced + `trader:subscribe`-gated), `signals.history`, and `portfolio.positions` tools.
+
+---
+
 ## 5. Secrets — you declare names, the host holds values
 
 Third-party credentials your tools need (e.g. `SEC_USER_AGENT`, `ALPACA_API_KEY`,

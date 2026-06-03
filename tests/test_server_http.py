@@ -69,6 +69,38 @@ def test_tools_call_over_http(client):
     assert payload["results"][0]["company"] == "NVIDIA CORP"
 
 
+def test_owner_ingest_over_http_then_feed_reflects(client):
+    """Enhancement 001 end-to-end: owner refreshes the live set in ONE authenticated call,
+    then the priced subscriber feed serves that data instead of the static seed."""
+    owner = {"Authorization": f"Bearer {mint_token('k', 'StanislavBG', 'pro', ['trader:admin'], 'https://mcp-host/mcp/social-trader')}"}
+    ing = client.post("/mcp/social-trader",
+                      json={"id": 1, "method": "tools/call",
+                            "params": {"name": "signals.ingest",
+                                       "arguments": {"dataset": "signals", "mode": "replace",
+                                                     "rows": [{"ticker": "HPE", "side": "short",
+                                                               "ts": "2026-06-02T15:00:00+00:00"}]}}},
+                      headers=owner)
+    assert ing.status_code == 200
+    assert json.loads(ing.json()["result"]["content"][0]["text"])["total"] == 1
+
+    h = _bearer("social-trader", ["trader:subscribe"])
+    h["X-Payment"] = "paid:beef"
+    feed = client.post("/mcp/social-trader",
+                       json={"id": 2, "method": "tools/call",
+                             "params": {"name": "signals.feed", "arguments": {}}}, headers=h)
+    payload = json.loads(feed.json()["result"]["content"][0]["text"])
+    assert [s["ticker"] for s in payload["signals"]] == ["HPE"]
+
+
+def test_owner_ingest_denied_for_non_owner_over_http(client):
+    r = client.post("/mcp/social-trader",
+                    json={"id": 1, "method": "tools/call",
+                          "params": {"name": "signals.ingest",
+                                     "arguments": {"dataset": "signals", "rows": [{"ticker": "X", "side": "buy"}]}}},
+                    headers=_bearer("social-trader", ["trader:admin"]))  # sub 'u' != owner
+    assert r.status_code == 403
+
+
 def test_paid_feed_402_then_paid(client):
     h = _bearer("social-trader", ["trader:subscribe"])
     body = {"id": 3, "method": "tools/call", "params": {"name": "signals.feed", "arguments": {}}}
