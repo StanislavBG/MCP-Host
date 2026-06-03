@@ -294,6 +294,10 @@ async def inspector(request: Request):
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
     gw: Gateway = request.app.state.gw
+    backend = getattr(gw.store, "backend", "unknown")
+    healthy = "unreachable" not in backend and not getattr(request.app.state, "preflight", [])
+    status_dot = "#2e7d32" if healthy else "#b8860b"
+    status_word = "ok" if healthy else "degraded"
     cards = ""
     for p in gw.providers():
         ok, score, _ = passes(p)
@@ -311,6 +315,12 @@ async def index(request: Request):
             f".card{{border:1px solid #ddd;border-radius:8px;padding:1rem;margin:1rem 0}}"
             f".demo-card{{opacity:.75;border-style:dashed}}"
             f".demo,.live{{font-size:.6em;vertical-align:middle;padding:.15em .5em;border-radius:1em;color:#fff}}"
-            f".demo{{background:#b8860b}}.live{{background:#2e7d32}}</style></head>"
-            f"<body><h1>MCP-Host</h1><p>The iStore for MCPs — {len(gw.providers())} providers hosted.</p>"
-            f"{cards}<p><a href='/inspector'>Inspector</a> · <a href='/admin/usage'>Usage</a></p></body></html>")
+            f".demo{{background:#b8860b}}.live{{background:#2e7d32}}"
+            f".meta{{color:#666;font-size:.85em}}.dot{{display:inline-block;width:.6em;height:.6em;"
+            f"border-radius:50%;background:{status_dot};margin-right:.4em}}</style></head>"
+            f"<body><h1>MCP-Host</h1>"
+            f"<p class=meta><span class=dot></span><b>{status_word}</b> · v{__version__} "
+            f"(build {BUILD_ID}) · backend {backend} · {len(gw.providers())} providers hosted</p>"
+            f"<p>The iStore for MCPs.</p>"
+            f"{cards}<p class=meta><a href='/health'>health</a> · <a href='/inspector'>Inspector</a> "
+            f"· <a href='/admin/usage'>Usage</a></p></body></html>")
