@@ -56,6 +56,7 @@ class PlatformHealthProvider(Provider):
             "status": "degraded" if (warnings or "unreachable" in str(backend)) else "ok",
             "service": "mcp-host",
             "version": meta.get("version", "0"),
+            "build": meta.get("build"),
             "backend": backend,
             "providers_mounted": len(self._providers()),
             "uptime_s": round(time.time() - started, 1) if started else None,

@@ -22,6 +22,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 
+from mcp_host import __version__
 from mcp_host.artifacts.store import ArtifactStore, verify_upload_auth
 from mcp_host.auth.principal import verify_token
 from mcp_host.billing.x402 import StubFacilitator
@@ -54,6 +55,23 @@ DEFAULT_PLANS = {
 def mask_ip(ip: str) -> str:
     parts = ip.split(".")
     return ".".join(parts[:2] + ["x", "x"]) if len(parts) == 4 else "x"
+
+
+def _build_id() -> str:
+    """Short id of the running code so /health reveals exactly what's deployed. Reads the git
+    short SHA if a checkout is present (the preferred sync path keeps .git); otherwise falls back
+    to MCP_HOST_BUILD or the package version (covers the zip-sync path that has no .git)."""
+    try:
+        repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        head = open(os.path.join(repo, ".git", "HEAD")).read().strip()
+        ref = head.split(" ", 1)[1] if head.startswith("ref:") else head
+        sha = open(os.path.join(repo, ".git", ref)).read().strip() if head.startswith("ref:") else ref
+        return sha[:7]
+    except Exception:
+        return os.environ.get("MCP_HOST_BUILD", __version__)
+
+
+BUILD_ID = _build_id()
 
 
 def build_gateway() -> Gateway:
@@ -119,6 +137,7 @@ async def lifespan(app: FastAPI):
     # First-party platform providers get a live view of the host injected at boot.
     host_meta = {
         "version": app.version,
+        "build": BUILD_ID,
         "base_url": BASE_URL,
         "backend": getattr(gw.store, "backend", "unknown"),
         "started_at": started_at,
@@ -135,7 +154,7 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="MCP-Host", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="MCP-Host", version=__version__, lifespan=lifespan)
 
 
 @app.middleware("http")
@@ -161,6 +180,8 @@ async def health(request: Request):
     backend = getattr(gw.store, "backend", "unknown")
     degraded = bool(problems) or "unreachable" in backend
     return {"status": "ok" if not degraded else "degraded",
+            "version": __version__,
+            "build": BUILD_ID,
             "providers": [p.id for p in gw.providers()],
             "config_warnings": problems,
             "backend": backend,
