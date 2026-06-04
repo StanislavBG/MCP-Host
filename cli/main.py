@@ -240,6 +240,61 @@ def cmd_ingest(args) -> int:
     return 0
 
 
+def cmd_register(args) -> int:
+    """Register as a platform owner. Prints {owner_id, api_key}; the api_key is shown once."""
+    url = args.base_url.rstrip("/") + "/register"
+    payload = {"display_name": args.display_name} if args.display_name else {}
+    req = urllib.request.Request(url, data=json.dumps(payload).encode(),
+                                 headers={"Content-Type": "application/json"}, method="POST")
+    try:
+        with urllib.request.urlopen(req) as resp:  # noqa: S310 (host URL)
+            print(resp.read().decode())
+    except urllib.error.HTTPError as e:
+        print(e.read().decode(), file=sys.stderr)
+        return 1
+    except urllib.error.URLError as e:
+        print(f"request failed: {e}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def build_publish_request(manifest: dict, api_key: str, base_url: str) -> tuple[str, dict[str, str], dict]:
+    """Pure: shape the POST /providers request. Unit-testable, no network."""
+    url = base_url.rstrip("/") + "/providers"
+    headers = {"Content-Type": "application/json", "x-api-key": api_key}
+    return url, headers, manifest
+
+
+def cmd_publish(args) -> int:
+    """Publish a declarative provider.json to the host (POST /providers, x-api-key auth)."""
+    try:
+        manifest = json.loads(Path(args.manifest).read_text())
+    except (OSError, json.JSONDecodeError) as e:
+        print(f"cannot read manifest: {e}", file=sys.stderr)
+        return 1
+    api_key = args.api_key or os.environ.get("MCP_HOST_API_KEY", "")
+    if not api_key:
+        print("provide --api-key or set MCP_HOST_API_KEY", file=sys.stderr)
+        return 1
+    url, headers, body = build_publish_request(manifest, api_key, args.base_url)
+    if args.dry_run:
+        preview = {"method": "POST", "url": url,
+                   "headers": {**headers, "x-api-key": "<redacted>"}, "body": body}
+        print(json.dumps(preview, indent=2))
+        return 0
+    req = urllib.request.Request(url, data=json.dumps(body).encode(), headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(req) as resp:  # noqa: S310 (host URL, owner-authenticated)
+            print(resp.read().decode())
+    except urllib.error.HTTPError as e:
+        print(e.read().decode(), file=sys.stderr)
+        return 1
+    except urllib.error.URLError as e:
+        print(f"request failed: {e}", file=sys.stderr)
+        return 1
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="mcp-host", description="MCP-Host provider lifecycle CLI")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -283,6 +338,18 @@ def build_parser() -> argparse.ArgumentParser:
     ig.add_argument("--signing-key", default=None, help="defaults to $MCP_HOST_SIGNING_KEY")
     ig.add_argument("--dry-run", action="store_true", help="print the request instead of sending")
     ig.set_defaults(func=cmd_ingest)
+
+    rg = sub.add_parser("register", help="register as a platform owner; returns a one-time API key")
+    rg.add_argument("--base-url", default=BASE_URL)
+    rg.add_argument("--display-name", default="", help="optional label for your owner principal")
+    rg.set_defaults(func=cmd_register)
+
+    pb = sub.add_parser("publish", help="publish a declarative provider.json (x-api-key auth)")
+    pb.add_argument("manifest", help="path to the provider.json (must declare backend.endpoint)")
+    pb.add_argument("--base-url", default=BASE_URL)
+    pb.add_argument("--api-key", default=None, help="owner API key; else $MCP_HOST_API_KEY")
+    pb.add_argument("--dry-run", action="store_true", help="print the request instead of sending")
+    pb.set_defaults(func=cmd_publish)
     return p
 
 

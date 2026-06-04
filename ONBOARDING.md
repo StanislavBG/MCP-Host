@@ -193,6 +193,69 @@ CI in your repo must run `mcp-host validate` and fail the build if it returns no
 
 ---
 
+## 6a. Self-serve hosting — register and publish a declarative provider (no operator)
+
+Everything above describes a **first-party / code** provider: a `Provider` subclass that runs
+in-process, mounted by a host operator (`deploy`). There is a second path that needs **no
+operator and no host code review** — a **declarative provider**, where *you* run the tool logic
+on your own public HTTPS service and the host proxies calls to it. Your code never runs inside
+the host process (which is why it can be fully self-serve next to the shared wallet).
+
+**1. Register as an owner — get a one-time API key.**
+```bash
+mcp-host register --base-url https://<host>            # → { "owner_id": "usr_…", "api_key": "mch_sk_…" }
+# or: curl -X POST https://<host>/register -d '{"display_name":"Acme"}'
+```
+Store the `api_key` immediately — it is shown once and stored only as a hash. It is your
+credential for publishing.
+
+**2. Write a declarative manifest.** Same `provider.json` as §2, with two differences: add a
+top-level `backend`, and give each tool an inline `input_schema` (no Pydantic model — there is no
+`provider.py`). `owner` is ignored on submit; the host binds it to *you* (the authenticated key),
+so you can only publish under your own ownership.
+```jsonc
+{
+  "id": "acme-quotes", "display_name": "Acme Quotes", "discipline": "market-data",
+  "version": "1.0.0", "summary": "Real-time equity quotes …",
+  "transport": "streamable-http",
+  "auth": { "modes": ["api_key"], "scopes": ["acme:read"] },
+  "data": { "postgres_schema": "acme_quotes" },
+  "tools": [{
+    "name": "quotes.get", "scope": "acme:read", "price_usdc": "0.00",
+    "description": "Return the latest bid/ask quote for a ticker symbol from Acme's feed.",
+    "annotations": { "readOnlyHint": true },
+    "input_schema": { "type": "object", "properties": { "ticker": { "type": "string" } } }
+  }],
+  "backend": { "kind": "external-http", "endpoint": "https://api.acme.example/mcp" }
+}
+```
+
+**3. Publish.** The host validates (schema + TDQS + SSRF guard on your endpoint), provisions your
+`<id>.*` schema + RLS, mounts you, and seeds consumer entitlements — all in one call.
+```bash
+mcp-host publish ./provider.json --base-url https://<host> --api-key "$MCP_HOST_API_KEY"
+# add --dry-run to print the request without sending
+```
+
+**4. Implement your endpoint.** For every `tools/call`, the host POSTs to your `backend.endpoint`:
+```jsonc
+// headers: X-MCP-Host-Signature (hex), X-MCP-Host-Timestamp, X-MCP-Host-Provider
+{ "tool": "quotes.get", "arguments": { "ticker": "NVDA" },
+  "provider": "acme-quotes",
+  "principal": { "id": "usr_…", "plan": "pro", "scopes": ["acme:read"] } }
+```
+Verify the signature — it is `HMAC_SHA256(host_signing_key, "<timestamp>." + raw_body)` — to
+trust the caller is the host, then return a **JSON object** (the tool result, e.g. the
+`{payload, built_at, schema_version}` envelope). Rules the host enforces, all **fail-closed**:
+your endpoint must be `https`, must not resolve to a private/loopback/link-local address
+(re-checked at every call to defeat DNS rebinding), must answer within the timeout, with a 2xx
+and a JSON object ≤ 256 KB — otherwise the caller gets `BACKEND_UNAVAILABLE` (502).
+
+Auth, billing, metering, audit, scope/quota, and the storefront listing still run host-side
+exactly as for a code provider — only the tool *body* lives on your service.
+
+---
+
 ## 7. Definition of done (what "hosted" means)
 
 Your MCP is hosted when, against a running MCP-Host:

@@ -133,3 +133,57 @@ def test_admin_usage_after_calls(client):
     assert r.status_code == 200
     tools = {u["tool"] for u in r.json()["usage"]}
     assert "list_companies" in tools
+
+
+# ---- self-serve registration + declarative deploy (M9) --------------------
+def _declarative_manifest(pid="acme-quotes"):
+    # IP-literal public endpoint keeps the SSRF guard's DNS path out of the test.
+    return {
+        "id": pid, "display_name": "Acme Quotes", "discipline": "market-data", "version": "1.0.0",
+        "summary": "Acme real-time quotes provider used to exercise the declarative proxy path.",
+        "transport": "streamable-http",
+        "auth": {"modes": ["api_key"], "scopes": ["acme:read"]},
+        "data": {"postgres_schema": "acme_quotes"},
+        "tools": [{
+            "name": "quotes.get", "scope": "acme:read", "price_usdc": "0.00",
+            "description": "Return the latest bid/ask quote for a ticker symbol from Acme's feed.",
+            "annotations": {"readOnlyHint": True},
+            "input_schema": {"type": "object", "properties": {"ticker": {"type": "string"}}},
+        }],
+        "backend": {"kind": "external-http", "endpoint": "https://93.184.216.34/mcp"},
+        "limits": {"rate_per_min": 60, "max_request_kb": 50},
+    }
+
+
+def test_register_returns_owner_and_one_time_key(client):
+    r = client.post("/register", json={"display_name": "Acme"})
+    assert r.status_code == 201
+    body = r.json()
+    assert body["owner_id"].startswith("usr_") and body["api_key"].startswith("mch_sk_")
+
+
+def test_register_rate_limited(client):
+    last = None
+    for _ in range(7):
+        last = client.post("/register", json={})
+    assert last.status_code == 429
+
+
+def test_publish_requires_api_key(client):
+    r = client.post("/providers", json=_declarative_manifest())
+    assert r.status_code == 401
+
+
+def test_register_then_publish_lists_provider(client):
+    key = client.post("/register", json={}).json()["api_key"]
+    r = client.post("/providers", json=_declarative_manifest(), headers={"x-api-key": key})
+    assert r.status_code == 201, r.text
+    assert r.json()["id"] == "acme-quotes"
+    assert "acme-quotes" in client.get("/health").json()["providers"]
+
+
+def test_publish_rejects_reserved_id(client):
+    key = client.post("/register", json={}).json()["api_key"]
+    r = client.post("/providers", json=_declarative_manifest("platform-evil"),
+                    headers={"x-api-key": key})
+    assert r.status_code == 403

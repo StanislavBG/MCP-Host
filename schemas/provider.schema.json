@@ -137,7 +137,29 @@
           "input_schema_ref": {
             "type": "string",
             "description": "JSON Pointer / $ref to the tool's input JSON Schema (Pydantic model with extra=forbid)."
+          },
+          "input_schema": {
+            "type": "object",
+            "description": "Inline JSON Schema for this tool's arguments. Declarative (backend-proxied) providers use this instead of a Pydantic model so tools/list and TDQS see real parameters."
           }
+        }
+      }
+    },
+    "backend": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Execution backend for a self-serve, third-party provider. When present, the host runs NO guest code: it proxies every tools/call to the owner's external HTTPS endpoint (HMAC-signed, fail-closed). First-party providers omit this and run in-process.",
+      "required": ["kind", "endpoint"],
+      "properties": {
+        "kind": {
+          "enum": ["external-http"],
+          "description": "Only external-http is supported: the host POSTs tools/call to endpoint over HTTPS."
+        },
+        "endpoint": {
+          "type": "string",
+          "format": "uri",
+          "description": "Public HTTPS URL the host proxies calls to. Must not resolve to a private/loopback/link-local address (SSRF-guarded at deploy and at call time).",
+          "pattern": "^https://"
         }
       }
     },

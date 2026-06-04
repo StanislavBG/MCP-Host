@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from cli.main import build_ingest_request, cmd_scaffold, validate_path
+from cli.main import build_ingest_request, build_publish_request, cmd_scaffold, validate_path
 from cli.main import main as cli_main
 from mcp_host.auth.principal import verify_token
 
@@ -87,3 +87,29 @@ def test_build_ingest_request_shape():
     assert url == "https://h/mcp/social-trader"
     assert headers["Authorization"] == "Bearer TOK"
     assert body["params"]["arguments"]["dataset"] == "positions"
+
+
+def test_cli_publish_dry_run_redacts_key(tmp_path, capsys):
+    f = tmp_path / "provider.json"
+    f.write_text(json.dumps({"id": "acme-quotes", "backend": {"endpoint": "https://api.acme.example/mcp"}}))
+    rc = cli_main(["publish", str(f), "--base-url", "https://mcp-host", "--api-key", "sek", "--dry-run"])
+    assert rc == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["url"] == "https://mcp-host/providers"
+    assert out["headers"]["x-api-key"] == "<redacted>"  # secret not printed
+    assert out["body"]["id"] == "acme-quotes"
+
+
+def test_cli_publish_needs_api_key(tmp_path, capsys, monkeypatch):
+    monkeypatch.delenv("MCP_HOST_API_KEY", raising=False)
+    f = tmp_path / "provider.json"
+    f.write_text(json.dumps({"id": "acme-quotes"}))
+    rc = cli_main(["publish", str(f), "--dry-run"])
+    assert rc == 1
+
+
+def test_build_publish_request_shape():
+    url, headers, body = build_publish_request({"id": "x"}, "key123", "https://h")
+    assert url == "https://h/providers"
+    assert headers["x-api-key"] == "key123"
+    assert body == {"id": "x"}

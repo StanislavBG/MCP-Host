@@ -26,9 +26,14 @@ from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from mcp_host import __version__
 from mcp_host.artifacts.store import ArtifactStore, verify_upload_auth
 from mcp_host.auth.principal import verify_token
+from mcp_host.auth.registration import register_owner
 from mcp_host.billing.x402 import StubFacilitator
 from mcp_host.data.factory import make_backends
-from mcp_host.data.store import Entitlement
+from mcp_host.gateway.deploy import (
+    load_declarative_providers,
+    publish_declarative_provider,
+    seed_entitlements,
+)
 from mcp_host.gateway.router import Gateway, GatewayConfig
 from mcp_host.registry.serverjson import to_server_json
 from mcp_host.registry.tdqs import passes
@@ -58,6 +63,24 @@ def mask_ip(ip: str) -> str:
     return ".".join(parts[:2] + ["x", "x"]) if len(parts) == 4 else "x"
 
 
+# Coarse abuse brake on the open /register endpoint: N registrations per masked-IP per window.
+# In-memory sliding window (resets on restart) — not a billing-grade limiter, just a flood guard.
+_REGISTER_WINDOW_SECS = 3600
+_REGISTER_MAX_PER_IP = 5
+_register_hits: dict[str, list[float]] = {}
+
+
+def _allow_register(ip_masked: str) -> bool:
+    now = time.time()
+    hits = [t for t in _register_hits.get(ip_masked, []) if now - t < _REGISTER_WINDOW_SECS]
+    if len(hits) >= _REGISTER_MAX_PER_IP:
+        _register_hits[ip_masked] = hits
+        return False
+    hits.append(now)
+    _register_hits[ip_masked] = hits
+    return True
+
+
 def _build_id() -> str:
     """Short id of the running code so /health reveals exactly what's deployed. Reads the git
     short SHA if a checkout is present (the preferred sync path keeps .git); otherwise falls back
@@ -81,19 +104,18 @@ def build_gateway() -> Gateway:
                  facilitator=StubFacilitator(), tenant=tenant)
     from providers import load_pilots
 
+    code_ids: list[str] = []
     for provider, secrets in load_pilots():
         gw.mount(provider, secrets)
-        owner_managed = provider.id in OWNER_MANAGED_PROVIDERS
         # Seed entitlements per declared scope across plans. :admin scopes are NEVER seeded —
         # the gateway authorizes them by ownership, not plan. Owner-managed providers grant their
         # (non-admin) scopes to every plan because the tool body enforces per-target ownership.
-        for scope in provider.manifest["auth"]["scopes"]:
-            if scope.endswith(":admin"):
-                continue
-            for plan, cfg in DEFAULT_PLANS.items():
-                if scope.endswith(cfg["scopes_suffix"]) or owner_managed:
-                    store.set_entitlement(Entitlement(plan, provider.id, scope,
-                                                      cfg["quota"], cfg["rate"]))
+        seed_entitlements(store, provider, DEFAULT_PLANS, provider.id in OWNER_MANAGED_PROVIDERS)
+        code_ids.append(provider.id)
+    # Re-mount self-served declarative providers persisted from prior runs. These are proxied to
+    # an external endpoint (no guest code in-process); see mcp_host/gateway/deploy.py.
+    for pid in load_declarative_providers(gw, SIGNING_KEY, code_ids):
+        seed_entitlements(store, gw.provider(pid), DEFAULT_PLANS)
     return gw
 
 
@@ -177,6 +199,64 @@ async def audit_and_security(request: Request, call_next):
 @app.get("/health")
 async def health(request: Request):
     return _health_payload(request.app)
+
+
+@app.post("/register")
+async def register(request: Request):
+    """Open self-serve registration: create an owner principal + issue a one-time API key.
+
+    Rate-limited per masked IP. The key is shown ONCE (stored only as a hash) and is the
+    credential for publishing providers via POST /providers.
+    """
+    ip = mask_ip(request.client.host if request.client else "x")
+    if not _allow_register(ip):
+        return JSONResponse({"error": "registration rate limit exceeded — try again later"},
+                            status_code=429)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    display_name = str(body.get("display_name", ""))[:80] if isinstance(body, dict) else ""
+    gw: Gateway = request.app.state.gw
+    reg = register_owner(gw.store, display_name)
+    return JSONResponse({
+        "owner_id": reg.owner_id,
+        "api_key": reg.api_key,
+        "note": ("Store this api_key now — it is shown once and cannot be recovered. Send it as "
+                 "the 'x-api-key' header to POST /providers to publish a provider you own."),
+    }, status_code=201)
+
+
+@app.post("/providers")
+async def publish_provider(request: Request):
+    """Owner-authenticated, self-serve deploy of a declarative provider.
+
+    Auth: x-api-key (from /register). The submitted manifest's owner is bound to the
+    authenticated principal — you can only publish under your own ownership. Only declarative
+    (backend.endpoint) providers are accepted here; guest code never runs in-process.
+    """
+    gw: Gateway = request.app.state.gw
+    api_key = request.headers.get("x-api-key") or request.headers.get("X-Api-Key")
+    if not api_key:
+        return JSONResponse({"error": "x-api-key required — register at POST /register"},
+                            status_code=401)
+    got = gw.store.principal_for_key(api_key)
+    if not got:
+        return JSONResponse({"error": "invalid api key"}, status_code=401)
+    owner_id = got[0]
+    try:
+        manifest = await request.json()
+    except Exception:
+        manifest = None
+    if not isinstance(manifest, dict):
+        return JSONResponse({"error": "body must be a JSON provider manifest"}, status_code=400)
+    try:
+        result = publish_declarative_provider(gw, manifest, owner_id, SIGNING_KEY,
+                                               default_plans=DEFAULT_PLANS)
+    except ToolError as e:
+        return JSONResponse({"error": e.message, "code": e.code.value}, status_code=e.http_status)
+    logger.info("[publish] owner=%s mounted provider=%s", owner_id, result["id"])
+    return JSONResponse(result, status_code=201)
 
 
 def _health_payload(app: FastAPI) -> dict:

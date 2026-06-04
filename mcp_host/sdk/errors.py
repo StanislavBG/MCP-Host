@@ -30,6 +30,8 @@ class ErrorCode(str, Enum):
     # Billing
     PAYMENT_REQUIRED = "PAYMENT_REQUIRED"
     FACILITATOR_UNAVAILABLE = "FACILITATOR_UNAVAILABLE"
+    # Upstream (declarative/proxied third-party providers)
+    BACKEND_UNAVAILABLE = "BACKEND_UNAVAILABLE"
     # Generic
     INTERNAL_ERROR = "INTERNAL_ERROR"
 
@@ -50,6 +52,7 @@ JSONRPC_CODE = {
     ErrorCode.QUOTA_EXCEEDED: -32005,
     ErrorCode.PAYMENT_REQUIRED: -32003,
     ErrorCode.FACILITATOR_UNAVAILABLE: -32003,
+    ErrorCode.BACKEND_UNAVAILABLE: -32003,
     ErrorCode.INTERNAL_ERROR: -32603,
 }
 
@@ -69,6 +72,7 @@ HTTP_STATUS = {
     ErrorCode.QUOTA_EXCEEDED: 429,
     ErrorCode.PAYMENT_REQUIRED: 402,
     ErrorCode.FACILITATOR_UNAVAILABLE: 503,
+    ErrorCode.BACKEND_UNAVAILABLE: 502,
     ErrorCode.INTERNAL_ERROR: 500,
 }
 
