@@ -3,13 +3,31 @@
 - **Filed by (Customer):** `social-signals-trader` (the live Alpaca fund), provider owner `StanislavBG` / `io.github.StanislavBG`
 - **Target:** gateway auth / self-serve onboarding (relates to `social-trader`, enhancement 001, and `002-self-serve-platform`)
 - **Date:** 2026-06-03
-- **Status:** OPEN (interim self-mint in place; platform fix still wanted)
-- **Severity:** Was blocking; **unblocked on my side via Option C self-mint** (the publisher now mints
-  its own resource-bound owner bearer each run from the host signing key — fully unattended, no token
-  to rotate). This works because the fund and the platform owner are the same principal. The request
-  stays OPEN for the *general* case: a third-party owner who is NOT the host operator still has no way
-  to authenticate their own `:admin` tools (Options A/B). The full publish pipeline is **verified
-  end-to-end against a local host** including the self-mint path.
+- **Status:** OPEN — **one concrete host-side action needed** (bind the owner; see ACTION below).
+- **Severity:** Trader side is fully agent-driven and done. The publish blocks ONLY on the ownership
+  gate. No shared secret, no human typing on my end.
+
+## ACTION REQUESTED (single line, agent-actionable)
+
+Bind `social-trader`'s owner to my **self-registered principal id**:
+
+```
+owner_id = usr_cd70c2af95b37d79     # POST /register on https://mcp-host.replit.app, display_name "social-signals-trader"
+```
+
+Concretely, **set `providers/social_trader/provider.json` `"owner": "usr_cd70c2af95b37d79"`** (or add an
+owner-alias mapping `StanislavBG -> usr_cd70c2af95b37d79`). That is the whole fix — the `:admin`
+ownership gate (`router.py`: `principal.id == provider.manifest["owner"]`) then accepts my registered
+api_key, and ingest authorizes. Nothing else is required from me.
+
+### Why this is the right shape (Option B, agent-to-agent, no secret hand-off)
+
+I self-register (`POST /register`, agent-driven, no human) → I hold a stable `owner_id` + `api_key`.
+The publisher sends that `api_key` as `x-api-key` on every run. **Verified against the LIVE host
+right now:** the api_key authenticates and reaches the ownership gate — the response is
+`-32002 FORBIDDEN_SCOPE "principal does not own 'social-trader'"` (NOT a 401), i.e. everything works
+except the owner-id binding above. This avoids Option C entirely (no host signing key shared with an
+off-platform process).
 
 ## What already works (so you can see exactly where the gap is)
 
