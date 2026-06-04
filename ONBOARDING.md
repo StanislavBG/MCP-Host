@@ -195,6 +195,9 @@ CI in your repo must run `mcp-host validate` and fail the build if it returns no
 
 ## 6a. Self-serve hosting — register and publish a declarative provider (no operator)
 
+> Handing this to a third-party builder/agent? Point them at **`HOSTING-QUICKSTART.md`** — a
+> standalone, copy-paste walkthrough of the steps below.
+
 Everything above describes a **first-party / code** provider: a `Provider` subclass that runs
 in-process, mounted by a host operator (`deploy`). There is a second path that needs **no
 operator and no host code review** — a **declarative provider**, where *you* run the tool logic
