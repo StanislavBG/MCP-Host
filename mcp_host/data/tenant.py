@@ -15,8 +15,16 @@ isolation test (tests/test_m2_data.py) proves a provider cannot read another's r
 
 from __future__ import annotations
 
+import json
 import sqlite3
+import time
 from typing import Any, Iterable
+
+from mcp_host.data import dataset_sql as ds
+
+
+def _now_iso() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime())
 
 
 class IsolationError(RuntimeError):
@@ -82,6 +90,110 @@ class TenantDB:
         """Test/inspection helper: count rows WITHOUT the tenant filter (proves isolation)."""
         self._guard_name(table)
         return int(self._conn.execute(f"SELECT COUNT(*) FROM {self._t(table)}").fetchone()[0])
+
+    # ---- managed datasets (free-form JSON documents) ---------------------
+    # A dataset is one table per provider: (tenant_id, doc_key, doc JSON, updated_at). Rows are
+    # arbitrary JSON; filtering/sorting use json_extract(doc, ?) with the path bound as a parameter
+    # (never interpolated). doc_key is the agent-designated key field; it is indexed, not unique —
+    # `get` returns the most-recently-written row for a key.
+    def _ds_table(self, dataset: str) -> str:
+        ds.validate_dataset_name(dataset)
+        return f"ds_{dataset}"
+
+    def dataset_provision(self, dataset: str, indexed: Iterable[str] = ()) -> None:
+        table = self._ds_table(dataset)
+        self._conn.execute(
+            f"CREATE TABLE IF NOT EXISTS {self._t(table)} "
+            "(tenant_id TEXT NOT NULL, doc_key TEXT NOT NULL, doc TEXT NOT NULL, updated_at TEXT NOT NULL)"
+        )
+        self._conn.execute(
+            f"CREATE INDEX IF NOT EXISTS {self._t(table)}_key ON {self._t(table)} (tenant_id, doc_key)"
+        )
+        for field in indexed or ():
+            ds.validate_field(field)  # field is regex-checked → safe to embed in the json path
+            self._conn.execute(
+                f"CREATE INDEX IF NOT EXISTS {self._t(table)}_f_{field} "
+                f"ON {self._t(table)} (json_extract(doc, '$.{field}'))"
+            )
+        self._conn.commit()
+
+    def dataset_write(self, dataset: str, key_field: str, rows: list[dict], mode: str = "upsert") -> int:
+        """replace (clear tenant rows then insert), append (insert), or upsert (replace by key).
+        Returns rows written. Each row must be a JSON object containing `key_field`."""
+        ds.validate_field(key_field)
+        ds.validate_mode(mode)
+        if not isinstance(rows, list):
+            raise ds.DatasetError("rows must be an array")
+        if len(rows) > ds.MAX_ROWS:
+            raise ds.DatasetError(f"at most {ds.MAX_ROWS} rows per publish")
+        self.dataset_provision(dataset)
+        table = self._t(self._ds_table(dataset))
+        now = _now_iso()
+        if mode == "replace":
+            self._conn.execute(f"DELETE FROM {table} WHERE tenant_id=?", [self.provider_id])
+        for row in rows:
+            if not isinstance(row, dict):
+                raise ds.DatasetError("each row must be a JSON object")
+            if key_field not in row:
+                raise ds.DatasetError(f"row missing key field '{key_field}'")
+            doc = json.dumps(row, separators=(",", ":"))
+            if len(doc.encode()) > ds.MAX_DOC_BYTES:
+                raise ds.DatasetError("row exceeds max document size")
+            key = str(row[key_field])
+            if mode == "upsert":
+                self._conn.execute(
+                    f"DELETE FROM {table} WHERE tenant_id=? AND doc_key=?", [self.provider_id, key])
+            self._conn.execute(
+                f"INSERT INTO {table} (tenant_id, doc_key, doc, updated_at) VALUES (?,?,?,?)",
+                [self.provider_id, key, doc, now])
+        self._conn.commit()
+        return len(rows)
+
+    def dataset_query(self, dataset: str, filters: Any = None, sort: Any = None,
+                      limit: Any = None, cursor: Any = None) -> dict[str, Any]:
+        """Filtered/sorted/paginated read over this tenant's dataset rows. Returns
+        {rows: [...docs], next_cursor: str|None}."""
+        norm = ds.normalize_filters(filters)
+        srt = ds.parse_sort(sort)
+        lim = ds.clamp_limit(limit)
+        off = ds.decode_cursor(cursor)
+        self.dataset_provision(dataset)
+        table = self._t(self._ds_table(dataset))
+
+        where = ["tenant_id=?"]
+        args: list[Any] = [self.provider_id]
+        for field, op, val in norm:
+            path = "$." + field
+            if op == "in":
+                qs = ",".join("?" * len(val))
+                where.append(f"json_extract(doc, ?) IN ({qs})")
+                args.append(path)
+                args.extend(val)
+            else:
+                where.append(f"json_extract(doc, ?) {ds.OPS[op]} ?")
+                args.append(path)
+                args.append(val)
+        sql = f"SELECT doc FROM {table} WHERE " + " AND ".join(where)
+        if srt:
+            sql += " ORDER BY json_extract(doc, ?) " + srt[1]
+            args.append("$." + srt[0])
+        else:
+            sql += " ORDER BY updated_at DESC"
+        sql += " LIMIT ? OFFSET ?"
+        args.append(lim + 1)  # fetch one extra to detect a next page
+        args.append(off)
+        out = self._conn.execute(sql, args).fetchall()
+        docs = [json.loads(r["doc"]) for r in out]
+        next_cursor = ds.encode_cursor(off + lim) if len(docs) > lim else None
+        return {"rows": docs[:lim], "next_cursor": next_cursor}
+
+    def dataset_get(self, dataset: str, key: Any) -> dict[str, Any] | None:
+        self.dataset_provision(dataset)
+        table = self._t(self._ds_table(dataset))
+        r = self._conn.execute(
+            f"SELECT doc FROM {table} WHERE tenant_id=? AND doc_key=? ORDER BY updated_at DESC LIMIT 1",
+            [self.provider_id, str(key)]).fetchone()
+        return json.loads(r["doc"]) if r else None
 
     # ---- internals -------------------------------------------------------
     def _t(self, name: str) -> str:

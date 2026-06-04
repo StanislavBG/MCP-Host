@@ -28,12 +28,14 @@ from mcp_host.artifacts.store import ArtifactStore, verify_upload_auth
 from mcp_host.auth.principal import verify_token
 from mcp_host.auth.registration import register_owner
 from mcp_host.billing.x402 import StubFacilitator
+from mcp_host.data.dataset_sql import DatasetError
 from mcp_host.data.factory import make_backends
 from mcp_host.gateway.deploy import (
-    load_declarative_providers,
-    publish_declarative_provider,
+    load_self_serve_providers,
+    publish_provider,
     seed_entitlements,
 )
+from mcp_host.sdk.dataset import ManagedDatasetProvider
 from mcp_host.gateway.router import Gateway, GatewayConfig
 from mcp_host.registry.serverjson import to_server_json
 from mcp_host.registry.tdqs import passes
@@ -114,7 +116,7 @@ def build_gateway() -> Gateway:
         code_ids.append(provider.id)
     # Re-mount self-served declarative providers persisted from prior runs. These are proxied to
     # an external endpoint (no guest code in-process); see mcp_host/gateway/deploy.py.
-    for pid in load_declarative_providers(gw, SIGNING_KEY, code_ids):
+    for pid in load_self_serve_providers(gw, SIGNING_KEY, code_ids):
         seed_entitlements(store, gw.provider(pid), DEFAULT_PLANS)
     return gw
 
@@ -228,7 +230,7 @@ async def register(request: Request):
 
 
 @app.post("/providers")
-async def publish_provider(request: Request):
+async def publish_provider_endpoint(request: Request):
     """Owner-authenticated, self-serve deploy of a declarative provider.
 
     Auth: x-api-key (from /register). The submitted manifest's owner is bound to the
@@ -251,12 +253,65 @@ async def publish_provider(request: Request):
     if not isinstance(manifest, dict):
         return JSONResponse({"error": "body must be a JSON provider manifest"}, status_code=400)
     try:
-        result = publish_declarative_provider(gw, manifest, owner_id, SIGNING_KEY,
-                                               default_plans=DEFAULT_PLANS)
+        result = publish_provider(gw, manifest, owner_id, SIGNING_KEY,
+                                  default_plans=DEFAULT_PLANS)
     except ToolError as e:
         return JSONResponse({"error": e.message, "code": e.code.value}, status_code=e.http_status)
-    logger.info("[publish] owner=%s mounted provider=%s", owner_id, result["id"])
+    logger.info("[publish] owner=%s mounted provider=%s (%s)", owner_id, result["id"],
+                result.get("kind", "?"))
     return JSONResponse(result, status_code=201)
+
+
+def _authorize_owner_write(headers: dict, provider, gw) -> bool:
+    """Owner-or-super-admin auth for the dataset REST write path. Accepts the super-admin
+    UPLOAD_SECRET, an owner bearer resource-bound to this provider, or the owner's API key."""
+    owner = provider.manifest.get("owner")
+    auth = headers.get("authorization") or headers.get("Authorization") or ""
+    if verify_upload_auth(auth, ADMIN_KEY):
+        return True
+    if auth.lower().startswith("bearer "):
+        try:
+            p = verify_token(SIGNING_KEY, auth[7:].strip(), gw.canonical_uri(provider.id))
+        except ToolError:
+            p = None
+        if p and (p.id == owner or p.id == PLATFORM_OWNER):
+            return True
+    api_key = headers.get("x-api-key") or headers.get("X-Api-Key")
+    if api_key:
+        got = gw.store.principal_for_key(api_key)
+        if got and (got[0] == owner or got[0] == PLATFORM_OWNER):
+            return True
+    return False
+
+
+@app.post("/mcp/{provider_id}/datasets/{dataset}/data")
+async def publish_dataset_data(provider_id: str, dataset: str, request: Request):
+    """Owner-gated REST write into a managed dataset. Body: {mode?: replace|append|upsert, rows: [...]}.
+    Equivalent to calling the generated <dataset>.publish tool, but a plain REST call for bulk loads."""
+    gw: Gateway = request.app.state.gw
+    provider = gw.provider(provider_id)
+    if not isinstance(provider, ManagedDatasetProvider):
+        return JSONResponse({"error": "unknown managed-dataset provider"}, status_code=404)
+    key_field = provider._key_for.get(dataset)
+    if key_field is None:
+        return JSONResponse({"error": f"unknown dataset '{dataset}' for {provider_id}"}, status_code=404)
+    if not _authorize_owner_write(dict(request.headers), provider, gw):
+        return JSONResponse({"error": "unauthorized — owner api-key/bearer or UPLOAD_SECRET required"},
+                            status_code=401)
+    if gw.tenant is None:
+        return JSONResponse({"error": "tenant store unavailable"}, status_code=503)
+    try:
+        body = await request.json()
+    except Exception:
+        body = None
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "body must be a JSON object {mode?, rows:[...]}"}, status_code=400)
+    try:
+        n = gw.tenant.handle(provider_id).dataset_write(
+            dataset, key_field, body.get("rows"), body.get("mode", "upsert"))
+    except DatasetError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    return {"status": "ok", "dataset": dataset, "written": n, "mode": body.get("mode", "upsert")}
 
 
 def _health_payload(app: FastAPI) -> dict:

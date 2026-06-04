@@ -145,6 +145,21 @@
         }
       }
     },
+    "datasets": {
+      "type": "array",
+      "description": "Managed datasets for a self-serve data provider. Each declares a name and a key field; the host stores free-form JSON rows in the provider's RLS-isolated schema and auto-generates <name>.query / <name>.get / <name>.publish tools. A provider with `datasets` runs NO guest code and needs no `backend`.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "key"],
+        "properties": {
+          "name": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,39}$", "description": "Dataset name; tools are generated as <name>.query/get/publish." },
+          "key": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,63}$", "description": "The document field used as the record key (for get and upsert)." },
+          "description": { "type": "string", "maxLength": 300 },
+          "indexed": { "type": "array", "items": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,63}$" }, "description": "Document fields to index for faster filtering/sorting." }
+        }
+      }
+    },
     "backend": {
       "type": "object",
       "additionalProperties": false,

@@ -15,6 +15,7 @@ from typing import Any, Callable, Iterable
 from mcp_host.data.store import Entitlement
 from mcp_host.registry.tdqs import GATE, passes
 from mcp_host.sdk import manifest as manifest_mod
+from mcp_host.sdk.dataset import ManagedDatasetProvider, expand_dataset_manifest
 from mcp_host.sdk.errors import ErrorCode, ToolError
 from mcp_host.sdk.proxy import ProxyProvider, _default_resolver
 
@@ -54,13 +55,32 @@ def seed_entitlements(store, provider, default_plans: dict[str, dict], owner_man
                                                   cfg["quota"], cfg["rate"]))
 
 
-def publish_declarative_provider(gw, manifest: dict[str, Any], owner_id: str, signing_key: str, *,
-                                  default_plans: dict[str, dict],
-                                  resolver: Callable[[str], list[str]] = _default_resolver,
-                                  gate: float = GATE,
-                                  reserved_ids: Iterable[str] = ()) -> dict[str, Any]:
-    """Validate, mount, and entitle a self-served declarative provider. Raise ToolError on any
-    rejection (the caller maps .http_status to the response). Returns a summary dict on success.
+def manifest_kind(manifest: dict[str, Any]) -> str:
+    """Which self-serve execution kind a manifest declares: 'proxy' (backend.endpoint),
+    'dataset' (datasets[]), or 'unknown'."""
+    if (manifest.get("backend") or {}).get("endpoint"):
+        return "proxy"
+    if manifest.get("datasets"):
+        return "dataset"
+    return "unknown"
+
+
+def _gate_tdqs(provider, gate: float) -> float:
+    ok, score, _ = passes(provider, gate)
+    if not ok:
+        raise ToolError(ErrorCode.VALIDATION_ERROR,
+                        f"TDQS {score} below gate {gate} — improve tool descriptions/annotations")
+    return score
+
+
+def publish_provider(gw, manifest: dict[str, Any], owner_id: str, signing_key: str, *,
+                     default_plans: dict[str, dict],
+                     resolver: Callable[[str], list[str]] = _default_resolver,
+                     gate: float = GATE,
+                     reserved_ids: Iterable[str] = ()) -> dict[str, Any]:
+    """Validate, mount, and entitle a self-served provider — either a declarative proxy
+    (backend.endpoint) or a managed-dataset provider (datasets[]). Raise ToolError on any
+    rejection (caller maps .http_status). Returns a summary dict on success.
     """
     m = normalize_submitted_manifest(manifest, owner_id)
     pid = m.get("id") or ""
@@ -70,50 +90,71 @@ def publish_declarative_provider(gw, manifest: dict[str, Any], owner_id: str, si
                         f"provider id prefix is reserved for first-party providers: '{pid}'")
     if gw.provider(pid) is not None or pid in set(reserved_ids):
         raise ToolError(ErrorCode.INVALID_REQUEST, f"provider '{pid}' already exists")
-    if not (m.get("backend") or {}).get("endpoint"):
-        raise ToolError(ErrorCode.INVALID_REQUEST,
-                        "self-serve providers must declare backend.endpoint (declarative only)")
 
-    # ProxyProvider.__init__ runs manifest validation + the SSRF guard on the endpoint.
-    try:
-        proxy = ProxyProvider(m, signing_key, resolver=resolver)
-    except manifest_mod.ManifestError as e:
-        raise ToolError(ErrorCode.VALIDATION_ERROR, str(e))
+    kind = manifest_kind(m)
+    if kind == "proxy":
+        try:
+            provider = ProxyProvider(m, signing_key, resolver=resolver)
+        except manifest_mod.ManifestError as e:
+            raise ToolError(ErrorCode.VALIDATION_ERROR, str(e))
+        score = _gate_tdqs(provider, gate)
+        gw.mount(provider)
+        seed_entitlements(gw.store, provider, default_plans)
+        return {"id": pid, "kind": "declarative-proxy", "owner": owner_id, "mounted": True,
+                "endpoint": provider.endpoint, "route": gw.canonical_uri(pid),
+                "scopes": list(provider.manifest["auth"]["scopes"]), "tdqs": score}
 
-    ok, score, _ = passes(proxy, gate)
-    if not ok:
-        raise ToolError(ErrorCode.VALIDATION_ERROR,
-                        f"TDQS {score} below gate {gate} — improve tool descriptions/annotations")
+    if kind == "dataset":
+        try:
+            expanded = expand_dataset_manifest(m)
+            provider = ManagedDatasetProvider(expanded)
+        except manifest_mod.ManifestError as e:
+            raise ToolError(ErrorCode.VALIDATION_ERROR, str(e))
+        score = _gate_tdqs(provider, gate)
+        gw.mount(provider)
+        if gw.tenant is not None:
+            provider.provision(gw.tenant.handle(pid))
+        seed_entitlements(gw.store, provider, default_plans)
+        return {"id": pid, "kind": "managed-dataset", "owner": owner_id, "mounted": True,
+                "datasets": [d["name"] for d in expanded["datasets"]],
+                "route": gw.canonical_uri(pid),
+                "scopes": list(provider.manifest["auth"]["scopes"]), "tdqs": score}
 
-    gw.mount(proxy)
-    seed_entitlements(gw.store, proxy, default_plans)
-    return {
-        "id": pid,
-        "owner": owner_id,
-        "endpoint": proxy.endpoint,
-        "mounted": True,
-        "route": gw.canonical_uri(pid),
-        "scopes": list(m["auth"]["scopes"]),
-        "tdqs": score,
-    }
+    raise ToolError(ErrorCode.INVALID_REQUEST,
+                    "self-serve providers must declare either backend.endpoint (proxy) or datasets (managed-dataset)")
 
 
-def load_declarative_providers(gw, signing_key: str, code_ids: Iterable[str],
-                               resolver: Callable[[str], list[str]] = _default_resolver) -> list[str]:
-    """At boot, re-mount every persisted declarative provider (has backend.endpoint) that isn't
-    already loaded from code. Returns the ids mounted. Skips any whose endpoint no longer passes
-    the SSRF guard (logged by the caller via the returned skip list is out of scope — they're
-    simply not mounted, failing closed)."""
+# Back-compat alias: the proxy-only entry point now dispatches through publish_provider.
+publish_declarative_provider = publish_provider
+
+
+def load_self_serve_providers(gw, signing_key: str, code_ids: Iterable[str],
+                              resolver: Callable[[str], list[str]] = _default_resolver) -> list[str]:
+    """At boot, re-mount every persisted self-serve provider (proxy or managed-dataset) that isn't
+    already loaded from code. Returns the ids mounted. Fails closed: a provider that no longer
+    builds (e.g. an endpoint that now fails the SSRF guard) is simply not mounted."""
     code = set(code_ids)
     mounted: list[str] = []
     for row in gw.store.list_providers():
         m = row.manifest
-        if row.id in code or not (m.get("backend") or {}).get("endpoint"):
+        if row.id in code:
             continue
+        kind = manifest_kind(m)
         try:
-            proxy = ProxyProvider(m, signing_key, resolver=resolver)
+            if kind == "proxy":
+                provider = ProxyProvider(m, signing_key, resolver=resolver)
+            elif kind == "dataset":
+                provider = ManagedDatasetProvider(m)
+            else:
+                continue
         except manifest_mod.ManifestError:
-            continue  # fail closed: a now-invalid endpoint is not mounted
-        gw.mount(proxy)
+            continue
+        gw.mount(provider)
+        if kind == "dataset" and gw.tenant is not None:
+            provider.provision(gw.tenant.handle(row.id))
         mounted.append(row.id)
     return mounted
+
+
+# Back-compat alias.
+load_declarative_providers = load_self_serve_providers

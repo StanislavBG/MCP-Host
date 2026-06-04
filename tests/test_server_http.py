@@ -187,3 +187,64 @@ def test_publish_rejects_reserved_id(client):
     r = client.post("/providers", json=_declarative_manifest("platform-evil"),
                     headers={"x-api-key": key})
     assert r.status_code == 403
+
+
+# ---- managed-dataset providers (M10) --------------------------------------
+def _dataset_manifest(pid="social-signals-trader"):
+    return {
+        "id": pid, "display_name": "Social Signals Trader", "discipline": "social-trading-signals",
+        "version": "1.0.0", "summary": "Buy/sell signals derived from social sentiment per ticker.",
+        "transport": "streamable-http",
+        "datasets": [{"name": "signals", "key": "ticker",
+                      "description": "Latest signal per ticker.", "indexed": ["ticker"]}],
+    }
+
+
+def test_register_publish_dataset_then_query(client):
+    key = client.post("/register", json={}).json()["api_key"]
+    r = client.post("/providers", json=_dataset_manifest(), headers={"x-api-key": key})
+    assert r.status_code == 201, r.text
+    assert r.json()["kind"] == "managed-dataset"
+    assert "social-signals-trader" in client.get("/health").json()["providers"]
+
+    # owner publishes rows via the REST write path
+    w = client.post("/mcp/social-signals-trader/datasets/signals/data",
+                    json={"mode": "replace",
+                          "rows": [{"ticker": "NVDA", "signal": "buy", "confidence": 0.9}]},
+                    headers={"x-api-key": key})
+    assert w.status_code == 200 and w.json()["written"] == 1
+
+    # consumer retrieves via the host-generated query tool (read-scoped bearer)
+    q = client.post("/mcp/social-signals-trader",
+                    json={"id": 1, "method": "tools/call",
+                          "params": {"name": "signals.query",
+                                     "arguments": {"filters": {"ticker": "NVDA"}}}},
+                    headers=_bearer("social-signals-trader", ["social-signals-trader:read"]))
+    assert q.status_code == 200, q.text
+    assert q.json()["result"]["payload"]["rows"][0]["signal"] == "buy"
+
+
+def test_owner_can_publish_via_tools_call(client):
+    key = client.post("/register", json={}).json()["api_key"]
+    client.post("/providers", json=_dataset_manifest(), headers={"x-api-key": key})
+    r = client.post("/mcp/social-signals-trader",
+                    json={"id": 2, "method": "tools/call",
+                          "params": {"name": "signals.publish",
+                                     "arguments": {"mode": "append",
+                                                   "rows": [{"ticker": "AMD", "signal": "sell"}]}}},
+                    headers={"x-api-key": key})  # owner api-key authorizes the :admin tool by ownership
+    assert r.status_code == 200, r.text
+    assert r.json()["result"]["payload"]["written"] == 1
+
+
+def test_dataset_write_requires_owner(client):
+    key = client.post("/register", json={}).json()["api_key"]
+    client.post("/providers", json=_dataset_manifest(), headers={"x-api-key": key})
+    # no credential
+    r = client.post("/mcp/social-signals-trader/datasets/signals/data", json={"rows": [{"ticker": "X"}]})
+    assert r.status_code == 401
+    # a different registered principal is not the owner
+    other = client.post("/register", json={}).json()["api_key"]
+    r2 = client.post("/mcp/social-signals-trader/datasets/signals/data",
+                     json={"rows": [{"ticker": "X"}]}, headers={"x-api-key": other})
+    assert r2.status_code == 401
