@@ -45,7 +45,19 @@ BASE_URL = os.environ.get("MCP_HOST_BASE_URL", "https://mcp-host")
 SIGNING_KEY = os.environ.get("MCP_HOST_SIGNING_KEY", "dev-signing-key")
 WALLET = os.environ.get("WALLET_ADDRESS", "0xSHARED")
 ADMIN_KEY = os.environ.get("UPLOAD_SECRET", "")
-ARTIFACT_ROOT = os.environ.get("MCP_HOST_ARTIFACTS", "/tmp/mcp-host-artifacts")
+
+
+def _default_artifact_root() -> str:
+    """Persistent artifact dir on the Reserved VM when available; /tmp only in local dev."""
+    explicit = os.environ.get("MCP_HOST_ARTIFACTS")
+    if explicit:
+        return explicit
+    if os.environ.get("REPLIT_DEPLOYMENT") or os.path.isdir("/home/runner/workspace"):
+        return "/home/runner/workspace/objects"
+    return "/tmp/mcp-host-artifacts"
+
+
+ARTIFACT_ROOT = _default_artifact_root()
 # Principal id of the platform super-admin: may wield any provider's :admin scope and upload
 # any provider's artifacts. Per-provider ownership lives in each provider.json `owner` field.
 PLATFORM_OWNER = os.environ.get("MCP_HOST_PLATFORM_OWNER", "StanislavBG")
@@ -135,9 +147,12 @@ def preflight() -> list[str]:
     if BASE_URL == "https://mcp-host":
         problems.append("MCP_HOST_BASE_URL is the placeholder — set it to your real public URL "
                         "(OAuth resource indicators, .well-known and server.json all derive from it)")
-    if not os.environ.get("DATABASE_URL", "").startswith("postgres"):
-        problems.append("DATABASE_URL is not a Postgres URL — running on in-memory SQLite that RESETS "
-                        "on every restart. Add Replit Postgres before deploying.")
+    from mcp_host.data.factory import resolve_sqlite_path
+    _, db_durable = resolve_sqlite_path("MCP_HOST_DB", "mcp-host.db")
+    if not (os.environ.get("DATABASE_URL", "").startswith("postgres") or db_durable):
+        problems.append("No durable store configured — running on in-memory SQLite that RESETS on every "
+                        "restart (registered API keys die on redeploy). Set MCP_HOST_DB to a persistent "
+                        "path (e.g. /home/runner/workspace/mcp-host.db) or provision Postgres.")
     if WALLET == "0xSHARED":
         problems.append("WALLET_ADDRESS is the placeholder — set your shared wallet address")
     if not ADMIN_KEY:

@@ -2,8 +2,9 @@
 
 Production target is Postgres (one DB, `platform.*` + per-provider schemas, RLS). For local
 dev and the test suite we use a SQLite-backed implementation with the SAME interface, so the
-gateway/billing/auth code is storage-agnostic. `make_store()` picks the backend from
-DATABASE_URL (postgres:// -> PgStore once provisioned; otherwise SQLite).
+gateway/billing/auth code is storage-agnostic. `data/factory.make_backends()` picks the
+backend from DATABASE_URL (postgres:// -> PgStore once provisioned; otherwise SQLite, file-backed
+on a persistent workspace so issued API keys survive a redeploy).
 
 The schema here mirrors plan §6. Tenant data (`<provider>.*`) lives behind TenantDB
 (data/tenant.py); this module is the host-owned control plane only.
@@ -30,6 +31,15 @@ def hash_key(raw: str) -> str:
     return hashlib.sha256(raw.encode()).hexdigest()
 
 
+def _ensure_parent_dir(path: str) -> None:
+    """Create the parent dir for a file-backed SQLite path so a durable path on a fresh VM
+    can't crash boot with 'unable to open database file'. No-op for :memory:."""
+    if path and path != ":memory:":
+        parent = os.path.dirname(path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+
+
 @dataclass
 class ProviderRow:
     id: str
@@ -54,6 +64,7 @@ class SqliteStore:
 
     def __init__(self, path: str = ":memory:") -> None:
         self.path = path
+        _ensure_parent_dir(path)
         self._conn = sqlite3.connect(path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
@@ -264,14 +275,3 @@ class SqliteStore:
     def delete_artifact(self, provider_id: str, name: str) -> None:
         self._conn.execute("DELETE FROM artifacts WHERE provider_id=? AND name=?", (provider_id, name))
         self._conn.commit()
-
-
-def make_store() -> SqliteStore:
-    """Backend selection. DATABASE_URL=postgres://... would build a PgStore (RLS) in production.
-    Until Postgres is provisioned we use SQLite at MCP_HOST_DB (file) or in-memory."""
-    url = os.environ.get("DATABASE_URL", "")
-    if url.startswith("postgres"):
-        raise NotImplementedError(
-            "PgStore is provisioned at deploy time on Replit; SqliteStore is the dev/test backend."
-        )
-    return SqliteStore(os.environ.get("MCP_HOST_DB", ":memory:"))

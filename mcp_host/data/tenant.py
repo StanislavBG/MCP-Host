@@ -21,6 +21,7 @@ import time
 from typing import Any, Iterable
 
 from mcp_host.data import dataset_sql as ds
+from mcp_host.data.store import _ensure_parent_dir
 
 
 def _now_iso() -> str:
@@ -210,6 +211,7 @@ class TenantDB:
 
 
 def open_tenant_conn(path: str = ":memory:") -> sqlite3.Connection:
+    _ensure_parent_dir(path)
     conn = sqlite3.connect(path, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys=ON")
