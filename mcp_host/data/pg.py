@@ -23,8 +23,14 @@ import threading
 import time
 from typing import Any
 
+from mcp_host.data import dataset_sql as ds
 from mcp_host.data.store import Entitlement, ISO, ProviderRow, hash_key
 from mcp_host.data.tenant import IsolationError, TenantManager
+
+
+def _as_doc(value: Any) -> dict:
+    """jsonb may arrive already decoded (dict) or as text depending on the adapter."""
+    return value if isinstance(value, (dict, list)) else json.loads(value)
 
 logger = logging.getLogger("mcp-host")
 
@@ -381,6 +387,105 @@ class PgTenantDB:
                 f"DELETE FROM {self.schema}.{_ident(table)} {clause}", tuple(params)
             )
         return cur.rowcount if cur.rowcount is not None else 0
+
+    # ---- managed datasets (mirror of TenantDB; RLS scopes every statement) ----
+    def _ds_table(self, dataset: str) -> str:
+        ds.validate_dataset_name(dataset)
+        return f"ds_{dataset}"
+
+    def dataset_provision(self, dataset: str, indexed: Any = ()) -> None:
+        table = self._ds_table(dataset)
+        fq = f"{self.schema}.{_ident(table)}"
+        with self._store.lock:
+            self._set_tenant()
+            for stmt in tenant_table_ddl(self.schema, table,
+                                         "doc_key TEXT NOT NULL, doc JSONB NOT NULL, updated_at TEXT NOT NULL"):
+                self._store._conn.execute(stmt)
+            self._store._conn.execute(f"CREATE INDEX IF NOT EXISTS {table}_key ON {fq} (doc_key)")
+            for field in indexed or ():
+                ds.validate_field(field)
+                self._store._conn.execute(
+                    f"CREATE INDEX IF NOT EXISTS {table}_f_{field} ON {fq} ((doc->>'{field}'))")
+
+    def dataset_write(self, dataset: str, key_field: str, rows: list[dict], mode: str = "upsert") -> int:
+        ds.validate_field(key_field)
+        ds.validate_mode(mode)
+        if not isinstance(rows, list):
+            raise ds.DatasetError("rows must be an array")
+        if len(rows) > ds.MAX_ROWS:
+            raise ds.DatasetError(f"at most {ds.MAX_ROWS} rows per publish")
+        self.dataset_provision(dataset)
+        fq = f"{self.schema}.{_ident(self._ds_table(dataset))}"
+        now = now_iso()
+        with self._store.lock:
+            self._set_tenant()
+            if mode == "replace":
+                self._store._conn.execute(f"DELETE FROM {fq}")
+            for row in rows:
+                if not isinstance(row, dict):
+                    raise ds.DatasetError("each row must be a JSON object")
+                if key_field not in row:
+                    raise ds.DatasetError(f"row missing key field '{key_field}'")
+                doc = json.dumps(row, separators=(",", ":"))
+                if len(doc.encode()) > ds.MAX_DOC_BYTES:
+                    raise ds.DatasetError("row exceeds max document size")
+                key = str(row[key_field])
+                if mode == "upsert":
+                    self._store._conn.execute(f"DELETE FROM {fq} WHERE doc_key=%s", (key,))
+                self._store._conn.execute(
+                    f"INSERT INTO {fq} (doc_key, doc, updated_at) VALUES (%s, %s::jsonb, %s)",
+                    (key, doc, now))
+        return len(rows)
+
+    def dataset_query(self, dataset: str, filters: Any = None, sort: Any = None,
+                      limit: Any = None, cursor: Any = None) -> dict[str, Any]:
+        norm = ds.normalize_filters(filters)
+        srt = ds.parse_sort(sort)
+        lim = ds.clamp_limit(limit)
+        off = ds.decode_cursor(cursor)
+        self.dataset_provision(dataset)
+        fq = f"{self.schema}.{_ident(self._ds_table(dataset))}"
+
+        where: list[str] = []
+        args: list[Any] = []
+        for field, op, val in norm:
+            if op == "in":
+                qs = ",".join(["%s"] * len(val))
+                where.append(f"doc->>%s IN ({qs})")
+                args.append(field)
+                args.extend(str(v) for v in val)
+            elif isinstance(val, (int, float)) and not isinstance(val, bool):
+                # numeric comparison, guarded so a non-numeric row can't raise a cast error
+                where.append(f"(jsonb_typeof(doc->%s)='number' AND (doc->>%s)::numeric {ds.OPS[op]} %s)")
+                args.extend([field, field, val])
+            else:
+                where.append(f"doc->>%s {ds.OPS[op]} %s")
+                args.extend([field, str(val)])
+        clause = ("WHERE " + " AND ".join(where)) if where else ""
+        sql = f"SELECT doc FROM {fq} {clause}"
+        if srt:
+            sql += " ORDER BY doc->>%s " + srt[1]
+            args.append(srt[0])
+        else:
+            sql += " ORDER BY updated_at DESC"
+        sql += " LIMIT %s OFFSET %s"
+        args.extend([lim + 1, off])
+        with self._store.lock:
+            self._set_tenant()
+            out = self._store._conn.execute(sql, tuple(args)).fetchall()
+        docs = [_as_doc(dict(r)["doc"]) for r in out]
+        next_cursor = ds.encode_cursor(off + lim) if len(docs) > lim else None
+        return {"rows": docs[:lim], "next_cursor": next_cursor}
+
+    def dataset_get(self, dataset: str, key: Any) -> dict[str, Any] | None:
+        self.dataset_provision(dataset)
+        fq = f"{self.schema}.{_ident(self._ds_table(dataset))}"
+        with self._store.lock:
+            self._set_tenant()
+            r = self._store._conn.execute(
+                f"SELECT doc FROM {fq} WHERE doc_key=%s ORDER BY updated_at DESC LIMIT 1", (str(key),)
+            ).fetchone()
+        return _as_doc(dict(r)["doc"]) if r else None
 
 
 class PgTenantManager(TenantManager):
