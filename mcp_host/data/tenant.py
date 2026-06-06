@@ -94,9 +94,11 @@ class TenantDB:
 
     # ---- managed datasets (free-form JSON documents) ---------------------
     # A dataset is one table per provider: (tenant_id, doc_key, doc JSON, updated_at). Rows are
-    # arbitrary JSON; filtering/sorting use json_extract(doc, ?) with the path bound as a parameter
-    # (never interpolated). doc_key is the agent-designated key field; it is indexed, not unique —
-    # `get` returns the most-recently-written row for a key.
+    # arbitrary JSON; filtering/sorting use json_extract(doc, '$.<field>') where <field> has been
+    # regex-validated (ds.validate_field) before reaching SQL — so the path is embedded literally,
+    # matching the expression index built in dataset_provision (a *bound* path parameter would NOT
+    # match that index, leaving `indexed` hints dead). Values are always bound. doc_key is the
+    # agent-designated key field; it is indexed, not unique — `get` returns the latest row for a key.
     def _ds_table(self, dataset: str) -> str:
         ds.validate_dataset_name(dataset)
         return f"ds_{dataset}"
@@ -164,20 +166,22 @@ class TenantDB:
         where = ["tenant_id=?"]
         args: list[Any] = [self.provider_id]
         for field, op, val in norm:
-            path = "$." + field
+            # field is regex-validated (normalize_filters -> validate_field), so embedding the
+            # json path literally is safe and lets SQLite use the matching expression index.
+            expr = f"json_extract(doc, '$.{field}')"
             if op == "in":
                 qs = ",".join("?" * len(val))
-                where.append(f"json_extract(doc, ?) IN ({qs})")
-                args.append(path)
+                where.append(f"{expr} IN ({qs})")
                 args.extend(val)
+            elif val is None and op in ("eq", "ne"):
+                # `field == null` must match missing/null rows; `= NULL` is never true in SQL.
+                where.append(f"{expr} IS {'NOT ' if op == 'ne' else ''}NULL")
             else:
-                where.append(f"json_extract(doc, ?) {ds.OPS[op]} ?")
-                args.append(path)
+                where.append(f"{expr} {ds.OPS[op]} ?")
                 args.append(val)
         sql = f"SELECT doc FROM {table} WHERE " + " AND ".join(where)
         if srt:
-            sql += " ORDER BY json_extract(doc, ?) " + srt[1]
-            args.append("$." + srt[0])
+            sql += f" ORDER BY json_extract(doc, '$.{srt[0]}') " + srt[1]
         else:
             sql += " ORDER BY updated_at DESC"
         sql += " LIMIT ? OFFSET ?"

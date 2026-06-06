@@ -114,6 +114,21 @@ def test_upsert_replaces_by_key_get_latest():
     assert len(t.dataset_query("signals")["rows"]) == 3  # still 3 distinct keys
 
 
+def test_query_null_filter_matches_missing_or_null():
+    t = _tdb()
+    t.dataset_write("signals", "ticker", [
+        {"ticker": "NVDA", "note": "hot"},
+        {"ticker": "AMD", "note": None},  # explicit json null
+        {"ticker": "INTC"},               # field absent
+    ], "replace")
+    # `note == null` matches both the explicit-null and the missing-field rows (not `= NULL`).
+    eq_null = {r["ticker"] for r in t.dataset_query("signals", filters={"note": None})["rows"]}
+    assert eq_null == {"AMD", "INTC"}
+    # `note != null` matches only the row with a real value.
+    ne_null = {r["ticker"] for r in t.dataset_query("signals", filters={"note": {"ne": None}})["rows"]}
+    assert ne_null == {"NVDA"}
+
+
 def test_write_missing_key_field_rejected():
     t = _tdb()
     with pytest.raises(ds.DatasetError):
