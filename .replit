@@ -10,7 +10,7 @@ PYTHONPATH = "/home/runner/workspace"
 
 [deployment]
 build = ["sh", "install.sh"]
-run = ["sh", "-c", "MCP_HOST_DB=/home/runner/workspace/mcp-host.db MCP_HOST_TENANT_DB=/home/runner/workspace/mcp-host-tenant.db MCP_HOST_ARTIFACTS=/home/runner/workspace/objects PYTHONPATH=.pythonlibs:/home/runner/workspace python3 -m uvicorn mcp_host.server:app --host 0.0.0.0 --port 8080 --timeout-keep-alive 120 --timeout-graceful-shutdown 30"]
+run = ["sh", "-c", "unset DATABASE_URL; MCP_HOST_DB=/home/runner/workspace/mcp-host.db MCP_HOST_TENANT_DB=/home/runner/workspace/mcp-host-tenant.db MCP_HOST_ARTIFACTS=/home/runner/workspace/objects PYTHONPATH=.pythonlibs:/home/runner/workspace python3 -m uvicorn mcp_host.server:app --host 0.0.0.0 --port 8080 --timeout-keep-alive 120 --timeout-graceful-shutdown 30"]
 deploymentTarget = "vm"
 
 [[ports]]
