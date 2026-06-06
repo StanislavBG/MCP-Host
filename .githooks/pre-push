@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Build-pipeline quality gate: no red test suite ever reaches the remote.
+# Runs the full pytest suite before any `git push`. Override with `git push --no-verify`.
+set -uo pipefail
+cd "$(git rev-parse --show-toplevel)" || exit 1
+
+if [ -x .venv/bin/python ]; then
+  PY=.venv/bin/python
+else
+  PY=python3
+fi
+
+echo "[pre-push] running pytest..."
+if ! "$PY" -m pytest -q; then
+  echo "[pre-push] tests FAILED — push aborted. Re-run after fixing, or 'git push --no-verify' to force."
+  exit 1
+fi
+echo "[pre-push] tests passed — allowing push."
+exit 0

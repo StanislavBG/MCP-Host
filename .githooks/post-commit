@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# Auto-push the current branch after each commit. The push itself fires the pre-push
+# hook, so the test gate still runs; a red suite aborts the push (the commit stays local).
+# Skips intermediate states (rebase/merge/cherry-pick) and detached HEAD.
+set -uo pipefail
+cd "$(git rev-parse --show-toplevel)" || exit 0
+
+git_dir=$(git rev-parse --git-dir)
+if [ -d "$git_dir/rebase-merge" ] || [ -d "$git_dir/rebase-apply" ] \
+   || [ -f "$git_dir/MERGE_HEAD" ] || [ -f "$git_dir/CHERRY_PICK_HEAD" ]; then
+  exit 0
+fi
+
+branch=$(git symbolic-ref --quiet --short HEAD) || exit 0  # detached HEAD → skip
+
+echo "[post-commit] auto-pushing '$branch' to origin..."
+if ! git push origin "$branch"; then
+  echo "[post-commit] push failed (tests red or network) — push manually when ready."
+fi
+exit 0
