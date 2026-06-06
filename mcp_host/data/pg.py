@@ -153,6 +153,7 @@ class PgStore:
 
     def __init__(self, dsn: str, conn: Any | None = None) -> None:
         self.lock = threading.RLock()
+        self._ds_provisioned: set[tuple[str, str]] = set()  # (schema, ds_table) already DDL'd this process
         if conn is not None:
             self._conn = conn  # injected (tests)
         else:  # pragma: no cover - needs a live DB
@@ -396,12 +397,20 @@ class PgTenantDB:
     def dataset_provision(self, dataset: str, indexed: Any = ()) -> None:
         table = self._ds_table(dataset)
         fq = f"{self.schema}.{_ident(table)}"
+        key = (self.schema, table)
         with self._store.lock:
             self._set_tenant()
-            for stmt in tenant_table_ddl(self.schema, table,
-                                         "doc_key TEXT NOT NULL, doc JSONB NOT NULL, updated_at TEXT NOT NULL"):
-                self._store._conn.execute(stmt)
-            self._store._conn.execute(f"CREATE INDEX IF NOT EXISTS {table}_key ON {fq} (doc_key)")
+            if key not in self._store._ds_provisioned:
+                # Table + RLS-policy DDL is idempotent but expensive (DROP/CREATE POLICY takes an
+                # exclusive catalog lock). The query/get/write ops call this for create-if-missing
+                # safety, so do the heavy DDL once per process, not on every call.
+                for stmt in tenant_table_ddl(self.schema, table,
+                                             "doc_key TEXT NOT NULL, doc JSONB NOT NULL, updated_at TEXT NOT NULL"):
+                    self._store._conn.execute(stmt)
+                self._store._conn.execute(f"CREATE INDEX IF NOT EXISTS {table}_key ON {fq} (doc_key)")
+                self._store._ds_provisioned.add(key)
+            # Index hints are cheap (IF NOT EXISTS) and only passed at mount/boot; keep them outside
+            # the once-per-process guard so a redeploy that adds an `indexed` field still applies it.
             for field in indexed or ():
                 ds.validate_field(field)
                 self._store._conn.execute(
@@ -449,23 +458,42 @@ class PgTenantDB:
         where: list[str] = []
         args: list[Any] = []
         for field, op, val in norm:
+            # field is regex-validated (normalize_filters -> validate_field), so the json key is
+            # embedded literally — matching the (doc->>'field') expression index. Values stay bound.
             if op == "in":
-                qs = ",".join(["%s"] * len(val))
-                where.append(f"doc->>%s IN ({qs})")
-                args.append(field)
-                args.extend(str(v) for v in val)
+                # Split numeric from text/bool so numbers match by magnitude (mirroring the eq
+                # branch and the SQLite backend), while strings still text-match. doc->> is text,
+                # so a bare IN would compare numbers as text and diverge across backends.
+                nums = [v for v in val if isinstance(v, (int, float)) and not isinstance(v, bool)]
+                others = [v for v in val if not (isinstance(v, (int, float)) and not isinstance(v, bool))]
+                ors: list[str] = []
+                if others:
+                    qs = ",".join(["%s"] * len(others))
+                    ors.append(f"doc->>'{field}' IN ({qs})")
+                    args.extend(str(v) for v in others)
+                if nums:
+                    qs = ",".join(["%s"] * len(nums))
+                    ors.append(f"(jsonb_typeof(doc->'{field}')='number' AND (doc->>'{field}')::numeric IN ({qs}))")
+                    args.extend(nums)
+                where.append("(" + " OR ".join(ors) + ")")
+            elif val is None and op in ("eq", "ne"):
+                # `field == null` must match missing/null rows; `= NULL` is never true in SQL.
+                where.append(f"doc->>'{field}' IS {'NOT ' if op == 'ne' else ''}NULL")
             elif isinstance(val, (int, float)) and not isinstance(val, bool):
                 # numeric comparison, guarded so a non-numeric row can't raise a cast error
-                where.append(f"(jsonb_typeof(doc->%s)='number' AND (doc->>%s)::numeric {ds.OPS[op]} %s)")
-                args.extend([field, field, val])
+                where.append(f"(jsonb_typeof(doc->'{field}')='number' AND (doc->>'{field}')::numeric {ds.OPS[op]} %s)")
+                args.append(val)
             else:
-                where.append(f"doc->>%s {ds.OPS[op]} %s")
-                args.extend([field, str(val)])
+                where.append(f"doc->>'{field}' {ds.OPS[op]} %s")
+                args.append(str(val))
         clause = ("WHERE " + " AND ".join(where)) if where else ""
         sql = f"SELECT doc FROM {fq} {clause}"
         if srt:
-            sql += " ORDER BY doc->>%s " + srt[1]
-            args.append(srt[0])
+            f, direction = srt
+            # Numeric-aware: cast numeric values so they order by magnitude (matching the SQLite
+            # backend's native-typed sort); non-numeric rows fall back to text order.
+            sql += (f" ORDER BY (CASE WHEN jsonb_typeof(doc->'{f}')='number' "
+                    f"THEN (doc->>'{f}')::numeric END) {direction} NULLS LAST, doc->>'{f}' {direction}")
         else:
             sql += " ORDER BY updated_at DESC"
         sql += " LIMIT %s OFFSET %s"

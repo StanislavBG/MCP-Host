@@ -16,8 +16,10 @@ import re
 from typing import Any
 
 # Single-level document field name. Deliberately strict: it is the only user-supplied token that
-# reaches a JSON path, so it must never carry anything but identifier characters.
-FIELD_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+# reaches a JSON path (embedded literally to match the expression index), so it must carry nothing
+# but identifier characters AND stay length-bounded — the same {0,63} bound as the schema's
+# key/indexed patterns, so an over-long field name can't be baked into a query string.
+FIELD_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
 
 # op -> SQL comparison operator. 'in' is handled separately (variadic).
 OPS = {"eq": "=", "ne": "<>", "gt": ">", "gte": ">=", "lt": "<", "lte": "<="}
@@ -26,6 +28,7 @@ DEFAULT_LIMIT = 50
 MAX_LIMIT = 200
 MAX_ROWS = 1000           # rows accepted per publish call
 MAX_DOC_BYTES = 64 * 1024  # serialized size cap per row
+MAX_STR_VALUE = 8 * 1024  # cap on a single filter string value (max_length per project rules)
 WRITE_MODES = ("replace", "append", "upsert")
 
 
@@ -48,6 +51,8 @@ def validate_dataset_name(name: str) -> str:
 def _scalar(v: Any) -> Any:
     if v is not None and not isinstance(v, (str, int, float, bool)):
         raise DatasetError("filter value must be a string/number/bool/null")
+    if isinstance(v, str) and len(v) > MAX_STR_VALUE:
+        raise DatasetError("filter string value too long")
     return v
 
 
