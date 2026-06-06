@@ -10,7 +10,11 @@ PYTHONPATH = "/home/runner/workspace"
 
 [deployment]
 build = "sh install.sh"
-run = ["sh", "-c", "MCP_HOST_DB=/home/runner/workspace/mcp-host.db MCP_HOST_TENANT_DB=/home/runner/workspace/mcp-host-tenant.db MCP_HOST_ARTIFACTS=/home/runner/workspace/objects PYTHONPATH=.pythonlibs:/home/runner/workspace python3 -m uvicorn mcp_host.server:app --host 0.0.0.0 --port 8080 --timeout-keep-alive 120 --timeout-graceful-shutdown 30"]
+# `unset DATABASE_URL`: Replit injects a DATABASE_URL pointing at the workspace-local `helium`
+# Postgres, which is unreachable from the Reserved VM. Clearing it at launch makes the host use
+# its durable file-backed SQLite directly (no failed Postgres attempt), so /health reports
+# backend "sqlite-file" / status "ok" instead of "sqlite-file (postgres unreachable)" / degraded.
+run = ["sh", "-c", "unset DATABASE_URL; MCP_HOST_DB=/home/runner/workspace/mcp-host.db MCP_HOST_TENANT_DB=/home/runner/workspace/mcp-host-tenant.db MCP_HOST_ARTIFACTS=/home/runner/workspace/objects PYTHONPATH=.pythonlibs:/home/runner/workspace python3 -m uvicorn mcp_host.server:app --host 0.0.0.0 --port 8080 --timeout-keep-alive 120 --timeout-graceful-shutdown 30"]
 # Reserved VM (always-on, single stateful process). Pick "Reserved VM" in the Deploy UI to
 # confirm — do NOT use Autoscale/cloudrun: this host keeps a local artifact dir, one pooled DB
 # connection, and (later) background workers, none of which fit a scale-to-zero/multi-instance model.
